@@ -450,18 +450,20 @@ export const FIXED_PRODUCT_PRICES: Record<number, number> = {
   39312: 27.075, // PRODUTO TABELA 7 OFICIAL
 };
 
+export function getFixedProductPrice(code: number): number {
+  const p = FIXED_PRODUCT_PRICES[code];
+  return p !== undefined && p > 0 ? p : 0;
+}
+
 export function getEffectiveProductPrice(
   code: number,
-  fallbackPrice: number = 0,
+  _fallbackPrice: number = 0,
   priceOverrides?: Record<number, number>
 ): number {
   if (priceOverrides && priceOverrides[code] !== undefined && priceOverrides[code] > 0) {
     return priceOverrides[code];
   }
-  if (FIXED_PRODUCT_PRICES[code] !== undefined && FIXED_PRODUCT_PRICES[code] > 0) {
-    return FIXED_PRODUCT_PRICES[code];
-  }
-  return fallbackPrice > 0 ? fallbackPrice : 0;
+  return getFixedProductPrice(code);
 }
 
 export function applyFixedPricesToRes(
@@ -470,7 +472,7 @@ export function applyFixedPricesToRes(
 ): ResRow[] {
   return res.map((r) => {
     const row = [...r] as ResRow;
-    row[5] = getEffectiveProductPrice(row[0], row[5], priceOverrides);
+    row[5] = getEffectiveProductPrice(row[0], 0, priceOverrides);
     return row;
   });
 }

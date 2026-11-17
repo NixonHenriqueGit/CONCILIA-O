@@ -1,4 +1,5 @@
 import { RawData, CalculatedProduct } from '../data/types';
+import { getEffectiveProductPrice } from '../data/fixedPrices';
 
 export interface CalcResult {
   C: CalculatedProduct[];
@@ -43,7 +44,8 @@ export function calculateProducts(data: RawData): CalcResult {
   });
 
   const C: CalculatedProduct[] = validRes.map((x) => {
-    const [c, d, t, G, V0, U, X, b, P, rm, rn, ro] = x;
+    const [c, d, t, G, V0, _storedU, X, b, P, rm, rn, ro] = x;
+    const U = getEffectiveProductPrice(c, _storedU, data.priceOverrides);
     const isDesativado = desativadosSet.has(c);
     const V = V0 || 1;
     const M = rm + (s.M[c] || 0);

@@ -161,11 +161,21 @@ async function executeSaveWithBackoff(
       const ecDocRef = doc(db, STATE_COLLECTION, EC_DOC);
       const contagensDocRef = doc(db, STATE_COLLECTION, CONTAGENS_DOC);
 
-      // Serializa o payload principal
+      // Preços ficam fixados apenas no código da plataforma e NÃO são enviados ao Firebase
+      const stripPricesFromRows = (rows?: any[][]) =>
+        Array.isArray(rows)
+          ? rows.map((r) => {
+              const copy = [...r];
+              copy[5] = 0;
+              return copy;
+            })
+          : rows;
+
+      // Serializa o payload principal sem armazenar preços
       const fullPayload = JSON.stringify({
         xs: data.xs,
-        res: data.res,
-        gradeRes: data.gradeRes,
+        res: stripPricesFromRows(data.res),
+        gradeRes: stripPricesFromRows(data.gradeRes),
         aj: data.aj,
         dia: data.dia,
         men: data.men,
@@ -175,7 +185,6 @@ async function executeSaveWithBackoff(
         dashboardSnapshots: data.dashboardSnapshots,
         ec0304: data.ec0304,
         ecSyncHash: data.ecSyncHash || '',
-        priceOverrides: data.priceOverrides || {},
         gradeEc: data.gradeEc,
         frozen020502: data.frozen020502 || {},
         frozen020502At: data.frozen020502At || '',
@@ -385,20 +394,19 @@ export async function loadStateFromFirestore(): Promise<RawData | null> {
     lastKnownTotalChunks = totalChunks;
     lastSavedEcHash = parsedEc ? computeEcContentHash(parsedEc) : '';
 
-    const loadedOverrides: Record<number, number> = parsedMain.priceOverrides || {};
-
+    // Preços não vêm do Firebase: sempre são consultados diretamente de FIXED_PRODUCT_PRICES no código
     return {
       xs: parsedMain.xs || [],
-      res: applyFixedPricesToRes(parsedMain.res || [], loadedOverrides),
+      res: applyFixedPricesToRes(parsedMain.res || []),
       gradeRes: parsedMain.gradeRes
-        ? applyFixedPricesToRes(parsedMain.gradeRes, loadedOverrides)
+        ? applyFixedPricesToRes(parsedMain.gradeRes)
         : undefined,
       aj: parsedMain.aj || { av: [], so: [], rp: [], fm: [] },
       dia: parsedMain.dia || [],
       men: parsedMain.men || [],
       ec: parsedEc || { h: [], r: [] },
       ecSyncHash: parsedMain.ecSyncHash || '',
-      priceOverrides: loadedOverrides,
+      priceOverrides: {},
       gradeEc: parsedMain.gradeEc,
       ec0304: parsedMain.ec0304,
       frozen020502: parsedMain.frozen020502 || {},
