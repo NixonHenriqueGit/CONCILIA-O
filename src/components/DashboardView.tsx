@@ -2243,50 +2243,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           >
             ↺ restaurar base zerada (sem divergências)
           </span>
-
-          {/* Aviso de Itens Desativados da Plataforma */}
-          {(data.desativados?.length || 0) > 0 && (
-            <div
-              style={{
-                marginTop: '10px',
-                padding: '6px 8px',
-                background: '#FEF2F2',
-                border: '1px solid #FECDD3',
-                borderRadius: '4px',
-                fontSize: '9.5px',
-                color: '#991B1B',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '4px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <Ban size={11} color="#DC2626" />
-                <span><b>{data.desativados?.length}</b> item(ns) desativado(s)</span>
-              </div>
-              {onNavigateToProdutos && (
-                <button
-                  type="button"
-                  onClick={() => onNavigateToProdutos()}
-                  style={{
-                    background: '#DC2626',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '3px',
-                    padding: '2px 6px',
-                    fontSize: '9px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer',
-                  }}
-                >
-                  Ver Catálogo
-                </button>
-              )}
-            </div>
-          )}
-
-
         </div>
       </div>
 
