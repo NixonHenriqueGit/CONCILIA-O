@@ -83,6 +83,36 @@ export interface DashboardSnapshot {
   savedAt: string;
 }
 
+export interface SavedDailyDiffItem {
+  cod: number;
+  desc: string;
+  fatorCx: number;
+  fatorHl: number;
+  precoCx: number;
+  difCx: number;
+  difValor: number;
+}
+
+export interface SavedDailyDiffRecord {
+  dateKey: string; // "YYYY-MM-DD" — chave única isolada por dia no Firebase
+  dateBR: string;  // "DD/MM/YYYY"
+  day: number;
+  month: number;
+  year: number;
+  savedAt: string;
+  sourceAction: 'CONGELAR' | 'SALVAR_DIF' | 'OFICIAL';
+  summary: {
+    totalFaltas: number;
+    totalSobras: number;
+    saldoFinal: number;
+    faltasCount: number;
+    sobrasCount: number;
+    divergenciasCount: number;
+    totalProdutos: number;
+  };
+  items: SavedDailyDiffItem[];
+}
+
 export interface SavedPopupItem {
   id: string;
   code: number;
@@ -125,10 +155,15 @@ export interface RawData {
   dia: DiaRow[];
   men: MenRow[];
   ec: EstoqueCentralData;
+  ecSyncHash?: string;
+  priceOverrides?: Record<number, number>;
   gradeEc?: EstoqueCentralData;
   ec0304?: EstoqueCentralData;
+  frozen020502?: Record<number, number>;
+  frozen020502At?: string;
   recontagens?: RecontagemItem[];
   desativados?: number[];
+  diferencaConfirmadaCodes?: number[];
   dashboardSnapshots?: DashboardSnapshot[];
   contagem021101?: {
     counts: {

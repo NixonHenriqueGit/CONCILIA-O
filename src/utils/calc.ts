@@ -95,25 +95,6 @@ export function calculateProducts(data: RawData): CalcResult {
     CM[r.c] = r;
   });
 
-  data.men.forEach((r) => {
-    // Busca a última diferença apurada válida nos dias 1 a 31
-    let lastDiff: number | null = null;
-    if (r[4]) {
-      for (let i = r[4].length - 1; i >= 0; i--) {
-        if (r[4][i] !== null && r[4][i] !== undefined) {
-          lastDiff = r[4][i];
-          break;
-        }
-      }
-    }
-    // r[5] representa a diferença real apurada no período (e não a soma de contagens repetidas)
-    r[5] = lastDiff !== null ? lastDiff : 0;
-    if (CM[r[0]]) {
-      r[1] = CM[r[0]].d;
-      r[2] = CM[r[0]].X;
-    }
-  });
-
   return { C, CM };
 }
 

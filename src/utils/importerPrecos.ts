@@ -1,6 +1,7 @@
 import { RawData, ResRow } from '../data/types';
 import { calculateProducts, sum } from './calc';
 import { Rt, formatBRL } from './formatters';
+import { splitDelimitedLine } from './importer020502';
 
 export interface ImportPrecosResult {
   success: boolean;
@@ -99,9 +100,7 @@ export function processTabelaPrecos(
     sep = '|';
   }
 
-  const allRows = lines.map((l) =>
-    l.split(sep).map((c) => c.trim().replace(/^"|"$/g, '').trim())
-  );
+  const allRows = lines.map((l) => splitDelimitedLine(l, sep));
 
   // Procura cabeçalho
   let headerIndex = -1;
@@ -113,6 +112,8 @@ export function processTabelaPrecos(
     const rowNorm = allRows[i].map(normalizeStr);
     const pIdx = rowNorm.findIndex(
       (c) =>
+        c === 'codigo mercadoria' ||
+        c === 'cod mercadoria' ||
         c === 'produto' ||
         c === 'codigo' ||
         c === 'cod' ||
@@ -122,17 +123,39 @@ export function processTabelaPrecos(
         c === 'item'
     );
 
-    const prIdx = rowNorm.findIndex(
-      (c) =>
-        c.includes('preco') ||
-        c.includes('valor') ||
-        c.includes('tabela') ||
-        c.includes('tab 7') ||
-        c.includes('tab7') ||
-        c === 'custo' ||
-        c === 'vlr' ||
-        c === 'u'
-    );
+    const findBestPriceIdx = () => {
+      const exactPrecoVenda = rowNorm.findIndex(
+        (c) => c === 'preco de venda' || c === 'preco venda' || c === 'preco' || c === 'u'
+      );
+      if (exactPrecoVenda >= 0) return exactPrecoVenda;
+
+      const exactValorMerc = rowNorm.findIndex(
+        (c) =>
+          c === 'valor ttv cheio' ||
+          c === 'valor de mercadoria' ||
+          c === 'valor mercadoria' ||
+          c === 'vlr' ||
+          c === 'custo' ||
+          c === 'tab 7' ||
+          c === 'tab7'
+      );
+      if (exactValorMerc >= 0) return exactValorMerc;
+
+      return rowNorm.findIndex(
+        (c) =>
+          (c.includes('preco') || c.includes('valor')) &&
+          !c.includes('tabela') &&
+          !c.includes('carreto') &&
+          !c.includes('icms') &&
+          !c.includes('ipi') &&
+          !c.includes('pis') &&
+          !c.includes('cofins') &&
+          !c.includes('base') &&
+          !c.includes('minimo')
+      );
+    };
+
+    const prIdx = findBestPriceIdx();
 
     const dIdx = rowNorm.findIndex(
       (c) => c.includes('descricao') || c.includes('descr') || c === 'nome'
@@ -239,10 +262,20 @@ export function processTabelaPrecos(
     return rowCopy;
   });
 
+  const nextPriceOverrides: Record<number, number> = {
+    ...(currentData.priceOverrides || {}),
+  };
+  priceMap.forEach((val, code) => {
+    if (val > 0) {
+      nextPriceOverrides[code] = val;
+    }
+  });
+
   const nextData: RawData = {
     ...currentData,
     res: nextRes,
-    gradeRes: nextRes,
+    gradeRes: nextRes.map((r) => [...r] as ResRow),
+    priceOverrides: nextPriceOverrides,
     desativados: currentData.desativados || [],
   };
 

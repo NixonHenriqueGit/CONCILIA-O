@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { CalculatedProduct } from '../data/types';
 import { N } from '../utils/formatters';
 import { sum } from '../utils/calc';
@@ -17,7 +17,7 @@ import {
 export interface SalvarDifModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirmSave: (targetDay: number) => Promise<void> | void;
+  onConfirmSave: (targetDateKey: string) => Promise<void> | void;
   calculated: CalculatedProduct[];
   xs: number[];
   desativados?: number[];
@@ -32,9 +32,22 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
   desativados = [],
 }) => {
   const today = new Date();
-  const currentDayOfMonth = today.getDate(); // 14
-  const [selectedDay, setSelectedDay] = useState<number>(currentDayOfMonth);
+  const getTodayKey = () => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const todayDateKey = getTodayKey();
+  const [selectedDateKey, setSelectedDateKey] = useState<string>(todayDateKey);
   const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedDateKey(getTodayKey());
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -55,14 +68,18 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
   const divergenciasCount = faltas.length + sobras.length;
 
   const handleConfirm = async () => {
+    if (!selectedDateKey) return;
     setIsSaving(true);
     try {
-      await onConfirmSave(selectedDay);
+      await onConfirmSave(selectedDateKey);
       onClose();
     } finally {
       setIsSaving(false);
     }
   };
+
+  const selectedDateBR = selectedDateKey ? selectedDateKey.split('-').reverse().join('/') : '';
+  const selectedDayNum = selectedDateKey ? parseInt(selectedDateKey.split('-')[2], 10) : today.getDate();
 
   const formattedToday = today.toLocaleDateString('pt-BR', {
     day: 'numeric',
@@ -174,9 +191,9 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
             >
               <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                 <Calendar size={15} />
-                SELECIONE O DIA DO MÊS PARA GRAVAR A DIF:
+                SELECIONE A DATA EXATA PARA GRAVAR A DIF ISOLADA:
               </span>
-              {selectedDay === currentDayOfMonth && (
+              {selectedDateKey === todayDateKey && (
                 <span
                   style={{
                     background: '#2B579A',
@@ -193,9 +210,10 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
             </label>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <select
-                value={selectedDay}
-                onChange={(e) => setSelectedDay(Number(e.target.value))}
+              <input
+                type="date"
+                value={selectedDateKey}
+                onChange={(e) => setSelectedDateKey(e.target.value)}
                 disabled={isSaving}
                 style={{
                   flex: 1,
@@ -208,37 +226,31 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
                   color: '#000',
                   cursor: 'pointer',
                 }}
-              >
-                {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
-                  <option key={d} value={d}>
-                    Dia {d} {d === currentDayOfMonth ? '(Hoje)' : ''}
-                  </option>
-                ))}
-              </select>
+              />
 
               <button
                 type="button"
-                onClick={() => setSelectedDay(currentDayOfMonth)}
-                disabled={selectedDay === currentDayOfMonth || isSaving}
+                onClick={() => setSelectedDateKey(todayDateKey)}
+                disabled={selectedDateKey === todayDateKey || isSaving}
                 className="btn"
                 style={{
                   padding: '8px 14px',
                   fontSize: '12px',
-                  background: selectedDay === currentDayOfMonth ? '#ccc' : '#fff',
+                  background: selectedDateKey === todayDateKey ? '#ccc' : '#fff',
                   border: '1px solid #1e3f70',
-                  color: selectedDay === currentDayOfMonth ? '#666' : '#1e3f70',
+                  color: selectedDateKey === todayDateKey ? '#666' : '#1e3f70',
                   borderRadius: '4px',
                   fontWeight: 'bold',
-                  cursor: selectedDay === currentDayOfMonth ? 'default' : 'pointer',
+                  cursor: selectedDateKey === todayDateKey ? 'default' : 'pointer',
                   whiteSpace: 'nowrap',
                 }}
               >
-                Usar Hoje (Dia {currentDayOfMonth})
+                Usar Hoje ({todayDateKey.split('-').reverse().join('/')})
               </button>
             </div>
 
             <p style={{ margin: '8px 0 0', fontSize: '11px', color: '#555' }}>
-              A conciliação de hoje será gravada na coluna do <b>Dia {selectedDay}</b> da tabela DIF Mensal.
+              Será gravada exclusivamente na aba <b>diferencas_diarias_salvas/{selectedDateKey}</b> no Firebase (Dia <b>{selectedDayNum}</b>), sem mesclar com nenhuma outra data.
             </p>
           </div>
 
@@ -338,7 +350,7 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
           >
             <CheckCircle2 size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
             <div>
-              Ao confirmar, a coluna do <b>Dia {selectedDay}</b> na <b>DIF Mensal</b> receberá as quantidades em caixas de cada produto da conciliação atual, e o sistema sincronizará os dados com o Firebase.
+              Ao confirmar, será criada/atualizada uma aba isolada no Firebase para a data <b>{selectedDateBR}</b> (<code style={{ fontSize: '10.5px' }}>diferencas_diarias_salvas/{selectedDateKey}</code>), contendo apenas as diferenças deste dia, sem nunca mesclar com outros dias.
             </div>
           </div>
         </div>
@@ -394,7 +406,7 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
             }}
           >
             <Save size={15} />
-            <span>{isSaving ? 'Gravando...' : `Confirmar e Salvar no Dia ${selectedDay}`}</span>
+            <span>{isSaving ? 'Gravando...' : `Confirmar e Salvar (${selectedDateBR})`}</span>
           </button>
         </div>
       </div>

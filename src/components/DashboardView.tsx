@@ -1,5 +1,5 @@
-import React, { useMemo, useState, useEffect } from 'react';
-import { RawData, CalculatedProduct, DashboardSnapshot, SavedPopupItem } from '../data/types';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
+import { RawData, CalculatedProduct, DashboardSnapshot, SavedPopupItem, SavedDailyDiffRecord } from '../data/types';
 import { N, Rt, RenderMoney } from '../utils/formatters';
 import { calculateProducts, sum } from '../utils/calc';
 import { Columns, Rows, CheckCircle2, Printer, Calendar, Ban, Package, X, Download, Camera } from 'lucide-react';
@@ -13,14 +13,15 @@ import { saveDevolucaoReminderDate, loadDevolucaoReminderDate } from '../firebas
 interface DashboardViewProps {
   data: RawData;
   calculated: CalculatedProduct[];
+  savedDailyDiffs?: Record<string, SavedDailyDiffRecord>;
   onCongelar: () => void;
   onSalvar: () => void;
   onLimpar: () => void;
   onVoltarOriginal: () => void;
   onOpenImport020502?: () => void;
-  onOpenAnalise?: (filter?: 'all' | 'vermelho' | 'laranja', code?: number | null) => void;
   onRecontar?: (code: number) => void;
   onToggleDesativar?: (code: number) => void;
+  onToggleDiferencaConfirmada?: (code: number, desc?: string) => void;
   onNavigateToProdutos?: (searchQuery?: string) => void;
   onSavePopup?: (item: SavedPopupItem) => void;
   canUndo?: boolean;
@@ -67,14 +68,15 @@ export interface ItemAnalysis {
 export const DashboardView: React.FC<DashboardViewProps> = ({
   data,
   calculated,
+  savedDailyDiffs = {},
   onCongelar,
   onSalvar,
   onLimpar,
   onVoltarOriginal,
   onOpenImport020502,
-  onOpenAnalise,
   onRecontar,
   onToggleDesativar,
+  onToggleDiferencaConfirmada,
   onNavigateToProdutos,
   onSavePopup,
   canUndo = false,
@@ -87,7 +89,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onDeleteSnapshot,
   onDownloadSnapshot020502,
 }) => {
-  const [statusFilter, setStatusFilter] = useState<'all' | 'verde' | 'laranja' | 'vermelho' | 'recontagem_match'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'verde' | 'laranja' | 'vermelho' | 'recontagem_match' | 'diferenca_permaneceu'>('all');
   const [viewMode, setViewMode] = useState<'side_by_side' | 'stacked' | 'faltas_only' | 'sobras_only'>('side_by_side');
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [selectedSnapshot, setSelectedSnapshot] = useState<DashboardSnapshot | null>(null);
@@ -96,6 +98,27 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [saveModalInitialDate, setSaveModalInitialDate] = useState<string | undefined>(undefined);
   const [showDevolucaoReminder, setShowDevolucaoReminder] = useState(false);
   const [lastReminderDate, setLastReminderDate] = useState<string | null>(null);
+
+  const diferencaConfirmadaSet = useMemo(
+    () => new Set<number>(data.diferencaConfirmadaCodes || []),
+    [data.diferencaConfirmadaCodes]
+  );
+
+  // Gerencia clique único, duplo clique (salvar pop-up) e triplo clique (marcar em azul: diferença permaneceu / não contar)
+  const qtyClickRef = useRef<{
+    key: string;
+    count: number;
+    lastTime: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>({ key: '', count: 0, lastTime: 0, timer: null });
+
+  useEffect(() => {
+    return () => {
+      if (qtyClickRef.current.timer) {
+        clearTimeout(qtyClickRef.current.timer);
+      }
+    };
+  }, []);
 
   // Carrega a data do lembrete diretamente do Firebase Firestore
   useEffect(() => {
@@ -267,48 +290,151 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return map;
   }, [data.men]);
 
-  // Identifica todos os dias que possuem conciliação gravada (1..31)
+  // Informações do mês e dias para o Calendário de Consulta Histórica e referência de hoje
+  const { firstDayOfMonth, totalDaysInMonth, monthName, todayDay, todayDateKey, currentMonthPrefix } = useMemo(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    const mStr = String(month + 1).padStart(2, '0');
+    const dStr = String(now.getDate()).padStart(2, '0');
+    return {
+      firstDayOfMonth: new Date(year, month, 1).getDay(),
+      totalDaysInMonth: new Date(year, month + 1, 0).getDate(),
+      monthName: now.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }),
+      todayDay: now.getDate(),
+      todayDateKey: `${year}-${mStr}-${dStr}`,
+      currentMonthPrefix: `${year}-${mStr}-`,
+    };
+  }, []);
+
+  // Indexação 100% isolada por data a partir do Firebase (diferencas_diarias_salvas/{YYYY-MM-DD})
+  const {
+    savedDiffsByDayInCurrentMonth,
+    latestPriorDailyRecord,
+    latestPriorItemsMap,
+  } = useMemo(() => {
+    const byDay = new Map<number, Map<number, number>>();
+    const records = Object.values(savedDailyDiffs) as SavedDailyDiffRecord[];
+
+    records.forEach((rec) => {
+      if (rec.dateKey && rec.dateKey.startsWith(currentMonthPrefix)) {
+        const m = new Map<number, number>();
+        rec.items.forEach((it) => m.set(it.cod, it.difCx));
+        byDay.set(rec.day, m);
+      }
+    });
+
+    const priorRecords = records
+      .filter(
+        (r) =>
+          r.dateKey &&
+          (r.dateKey < todayDateKey ||
+            (r.dateKey === todayDateKey && r.sourceAction === 'CONGELAR'))
+      )
+      .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+
+    const latestPrior = priorRecords.length > 0 ? priorRecords[priorRecords.length - 1] : null;
+    const priorItems = new Map<number, number>();
+    if (latestPrior) {
+      latestPrior.items.forEach((it) => priorItems.set(it.cod, it.difCx));
+    }
+
+    return {
+      savedDiffsByDayInCurrentMonth: byDay,
+      latestPriorDailyRecord: latestPrior,
+      latestPriorItemsMap: priorItems,
+    };
+  }, [savedDailyDiffs, currentMonthPrefix, todayDateKey]);
+
+  // Identifica todos os dias que possuem conciliação gravada no mês ativo (1..31)
   const daysWithConciliacao = useMemo(() => {
     const set = new Set<number>();
-    set.add(14); // Dia 14 sempre disponível com a conciliação gravada de ontem
+    savedDiffsByDayInCurrentMonth.forEach((_map, day) => set.add(day));
     data.men.forEach((r) => {
       if (r[4]) {
         r[4].forEach((v, idx) => {
-          if (v !== null && v !== undefined && v !== 0) {
+          if (v !== null && v !== undefined) {
             set.add(idx + 1);
           }
         });
       }
     });
     return set;
-  }, [data.men]);
+  }, [data.men, savedDiffsByDayInCurrentMonth]);
 
-  // Identifica o último dia que possui conciliação/dados gravados
+  // Identifica o último dia gravado na DIF Mensal (considerando inclusive valores 0 registrados)
   const latestRecordedDay = useMemo(() => {
-    let maxDay = 14;
-    data.men.forEach((r) => {
-      if (r[4]) {
-        r[4].forEach((v, idx) => {
-          if (v !== null && v !== undefined && v !== 0) {
-            if (idx + 1 > maxDay) maxDay = idx + 1;
-          }
-        });
+    let maxDay = 0;
+    daysWithConciliacao.forEach((d) => {
+      if (d > maxDay) maxDay = d;
+    });
+    return maxDay > 0 ? maxDay : Math.max(1, todayDay - 1);
+  }, [daysWithConciliacao, todayDay]);
+
+  // Último dia registrado anterior a hoje no mês atual (prioriza a aba isolada no Firebase)
+  const lastRecordedMenDay = useMemo(() => {
+    if (latestPriorDailyRecord && latestPriorDailyRecord.dateKey.startsWith(currentMonthPrefix)) {
+      return latestPriorDailyRecord.day;
+    }
+    let maxBeforeToday = 0;
+    let maxOverall = 0;
+    daysWithConciliacao.forEach((d) => {
+      if (d > maxOverall) maxOverall = d;
+      if (d < todayDay && d > maxBeforeToday) {
+        maxBeforeToday = d;
       }
     });
-    return maxDay;
-  }, [data.men]);
+    return maxBeforeToday > 0 ? maxBeforeToday : maxOverall;
+  }, [daysWithConciliacao, todayDay, latestPriorDailyRecord, currentMonthPrefix]);
 
-  // Função para obter o histórico e a variação dos últimos 5 dias para o popup
+  // Busca a última diferença registrada até o dia de referência (sem nunca mesclar outros meses)
+  const getLastMenDiff = (code: number, upToDay: number): number | null => {
+    for (let d = upToDay; d >= 1; d--) {
+      const isolatedDayMap = savedDiffsByDayInCurrentMonth.get(d);
+      if (isolatedDayMap) {
+        return isolatedDayMap.get(code) ?? 0;
+      }
+    }
+    const entry = menMap.get(code);
+    if (entry && entry.dias && upToDay > 0) {
+      const startIdx = Math.min(upToDay - 1, entry.dias.length - 1);
+      for (let idx = startIdx; idx >= 0; idx--) {
+        const val = entry.dias[idx];
+        if (val !== null && val !== undefined) {
+          return val;
+        }
+      }
+    }
+    if (entry && entry.fechamento !== null && entry.fechamento !== undefined && entry.fechamento !== 0) {
+      return entry.fechamento;
+    }
+    return null;
+  };
+
+  // Função para obter o histórico e a variação dos últimos 5 dias para o popup (sempre lendo cada dia isolado)
   const getProductLast5Days = (code: number, isFalta: boolean, currentQty: number) => {
-    const refDay = selectedDay !== null ? selectedDay : latestRecordedDay;
-    const dayNumbers: number[] = [];
-    const startDay = Math.max(1, refDay - 4);
-    for (let d = startDay; d <= Math.min(31, startDay + 4); d++) {
-      dayNumbers.push(d);
+    const refDay = selectedDay !== null ? selectedDay : Math.max(todayDay, latestRecordedDay);
+    const recordedBeforeRef = Array.from(daysWithConciliacao)
+      .filter((d) => d < refDay)
+      .sort((a, b) => a - b);
+
+    const pickedSet = new Set<number>([refDay]);
+    // Inclui os últimos dias realmente registrados (ex: Dia 10)
+    for (let i = recordedBeforeRef.length - 1; i >= 0 && pickedSet.size < 5; i--) {
+      pickedSet.add(recordedBeforeRef[i]);
     }
-    while (dayNumbers.length < 5 && dayNumbers[0] > 1) {
-      dayNumbers.unshift(dayNumbers[0] - 1);
+    // Completa até 5 colunas com os dias anteriores ao refDay caso haja poucos dias registrados
+    let cursor = refDay - 1;
+    while (pickedSet.size < 5 && cursor >= 1) {
+      pickedSet.add(cursor);
+      cursor--;
     }
+    cursor = refDay + 1;
+    while (pickedSet.size < 5 && cursor <= 31) {
+      pickedSet.add(cursor);
+      cursor++;
+    }
+    const dayNumbers = Array.from(pickedSet).sort((a, b) => a - b);
 
     const daysData = dayNumbers.map((d) => {
       let qtyVal = 0;
@@ -317,13 +443,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       } else {
         const diffVal = getProductDayDiff(d, code);
         qtyVal = isFalta ? Math.abs(diffVal < 0 ? diffVal : 0) : Math.max(0, diffVal);
-        if (qtyVal === 0 && d === refDay - 1 && selectedDay === null) {
-          const prevEntry = diaMap[code];
-          if (prevEntry) {
-            const v = prevEntry.eq;
-            qtyVal = isFalta ? Math.abs(v < 0 ? v : 0) : Math.max(0, v);
-          }
-        }
       }
 
       return {
@@ -334,7 +453,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       };
     });
 
-    const firstVal = daysData[0]?.qty ?? 0;
+    const lastRecDayNum = recordedBeforeRef.length > 0 ? recordedBeforeRef[recordedBeforeRef.length - 1] : null;
+    const compareDay = (lastRecDayNum !== null ? daysData.find((x) => x.day === lastRecDayNum) : undefined)
+      || (dayNumbers.length > 1 ? daysData[daysData.length - 2] : daysData[0]);
+    const firstVal = compareDay?.qty ?? 0;
     const lastVal = daysData[daysData.length - 1]?.qty ?? 0;
     const periodDiff = lastVal - firstVal;
     const avg = daysData.reduce((acc, curr) => acc + curr.qty, 0) / daysData.length;
@@ -348,40 +470,45 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     };
   };
 
-  // Função para obter a diferença (em caixas) de um produto em um dia específico
+  // Função para obter a diferença (em caixas) de um produto em um dia específico (prioriza aba isolada no Firebase)
   const getProductDayDiff = (day: number, code: number): number => {
+    const isolatedDayMap = savedDiffsByDayInCurrentMonth.get(day);
+    if (isolatedDayMap) {
+      return isolatedDayMap.get(code) ?? 0;
+    }
     const entry = menMap.get(code);
     const val = entry?.dias?.[day - 1];
     if (val !== null && val !== undefined) {
       return val;
     }
-    // Se for Dia 14 e não tiver na DIF Mensal, busca em rawDia ou data.dia
-    if (day === 14) {
-      const raw = rawDiaMap.get(code);
-      if (raw !== undefined && raw !== null) return raw;
-      const diaEntry = data.dia.find((x) => x[0] === code);
-      if (diaEntry && (diaEntry[2] !== 0 || diaEntry[1] !== 0)) {
-        return diaEntry[2] || diaEntry[1];
-      }
-    }
     return 0;
   };
 
-  // Função para analisar um item (falta ou sobra) comparando hoje/dia selecionado contra o dia anterior
+  // Função para analisar um item comparando hoje/dia selecionado contra o último dia isolado gravado no Firebase
   const analyzeRow = (code: number, isFalta: boolean, currentQty: number): ItemAnalysis => {
     let prevDiff = 0;
     if (selectedDay === null) {
-      const prevEntry = diaMap[code];
-      prevDiff = prevEntry ? prevEntry.eq : 0;
+      if (latestPriorDailyRecord) {
+        prevDiff = latestPriorItemsMap.get(code) ?? 0;
+      } else {
+        const menLast = lastRecordedMenDay > 0 ? getLastMenDiff(code, lastRecordedMenDay) : null;
+        if (menLast !== null) {
+          prevDiff = menLast;
+        } else {
+          const prevEntry = diaMap[code];
+          prevDiff = prevEntry ? prevEntry.eq : 0;
+        }
+      }
     } else {
       if (selectedDay > 1) {
-        prevDiff = getProductDayDiff(selectedDay - 1, code);
+        const menPrev = getLastMenDiff(code, selectedDay - 1);
+        prevDiff = menPrev !== null ? menPrev : getProductDayDiff(selectedDay - 1, code);
       } else {
         prevDiff = menMap.get(code)?.fechamento ?? 0;
       }
     }
 
-    // Quantidade de falta ou sobra no dia anterior
+    // Quantidade de falta ou sobra no último dia registrado
     const ontem = isFalta
       ? Math.abs(prevDiff < 0 ? prevDiff : 0)
       : Math.max(0, prevDiff);
@@ -389,7 +516,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     // Quantidade atual
     const hoje = Math.round(currentQty);
 
-    // Divergência em caixas entre hoje e o dia anterior
+    // Divergência em caixas entre hoje e a última diferença registrada
     const diff = Math.abs(hoje - ontem);
 
     if (diff < 2) {
@@ -433,21 +560,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       // MODO CONCILIAÇÃO ATUAL (AO VIVO)
       const sv0 = (r: CalculatedProduct) => (data.xs.includes(r.c) ? 0 : r.S);
 
-      // FALTAS: apenas produtos com divergência real de falta em caixas (R < 0)
-      const faltas = activeProducts.filter((r) => r.R < 0);
-      faltas.sort((a, b) => a.S - b.S); // Maior perda financeira (mais negativo) primeiro
+      // FALTAS: produtos com divergência real de falta em caixas (R < 0); se zerado, exibe os produtos ativos com 0
+      const faltasDivergentes = activeProducts.filter((r) => r.R < 0);
+      faltasDivergentes.sort((a, b) => a.S - b.S); // Maior perda financeira (mais negativo) primeiro
 
-      // SOBRAS: apenas produtos com divergência real de sobra em caixas (R > 0)
-      const sobras = activeProducts.filter((r) => r.R > 0 && sv0(r) >= 0);
-      sobras.sort((a, b) => sv0(b) - sv0(a)); // Maior sobra financeira primeiro
+      const faltas =
+        faltasDivergentes.length > 0
+          ? faltasDivergentes
+          : [...activeProducts].sort((a, b) => a.c - b.c);
 
-      const totalF = sum(faltas, (r) => -r.S);
-      const totalS = sum(sobras, sv0);
+      // SOBRAS: produtos com divergência real de sobra em caixas (R > 0); se zerado, exibe os produtos ativos com 0
+      const sobrasDivergentes = activeProducts.filter((r) => r.R > 0 && sv0(r) >= 0);
+      sobrasDivergentes.sort((a, b) => sv0(b) - sv0(a)); // Maior sobra financeira primeiro
 
-      // Ranking de Faltas: apenas itens com falta real
+      const sobras =
+        sobrasDivergentes.length > 0
+          ? sobrasDivergentes
+          : [...activeProducts].sort((a, b) => a.c - b.c);
+
+      const totalF = sum(faltasDivergentes, (r) => -r.S);
+      const totalS = sum(sobrasDivergentes, sv0);
+
+      // Ranking de Faltas
       const fRows = faltas.map((r, i) => {
-        const qtde = Math.abs(r.R);
-        const valor = -r.S;
+        const isDivergent = r.R < 0;
+        const qtde = isDivergent ? Math.abs(r.R) : 0;
+        const valor = isDivergent ? -r.S : 0;
         const analysis = analyzeRow(r.c, true, qtde);
         return {
           rank: i + 1,
@@ -460,10 +598,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         };
       });
 
-      // Ranking de Sobras: apenas itens com sobra real
+      // Ranking de Sobras
       const sRows = sobras.map((r, i) => {
-        const valS = sv0(r);
-        const qtde = Math.abs(r.R);
+        const isDivergent = r.R > 0;
+        const valS = isDivergent ? sv0(r) : 0;
+        const qtde = isDivergent ? Math.abs(r.R) : 0;
         const valor = valS;
         const analysis = analyzeRow(r.c, false, qtde);
         return {
@@ -565,7 +704,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       cf: colorScaleF,
       cs: colorScaleS,
     };
-  }, [effectiveCalculated, data.xs, diaMap, selectedDay, menMap, rawDiaMap, selectedSnapshot]);
+  }, [effectiveCalculated, data.xs, data.desativados, diaMap, selectedDay, menMap, rawDiaMap, selectedSnapshot, lastRecordedMenDay, latestPriorDailyRecord, latestPriorItemsMap, savedDiffsByDayInCurrentMonth]);
 
   // Contagem para exibição nos botões de filtro sobre TODOS os itens
   const counts = useMemo(() => {
@@ -607,18 +746,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return count;
   }, [f, s, matched021101Map]);
 
-  // Informações do mês e dias para o Calendário de Consulta Histórica
-  const { firstDayOfMonth, totalDaysInMonth, monthName, todayDay } = useMemo(() => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = now.getMonth();
-    return {
-      firstDayOfMonth: new Date(year, month, 1).getDay(),
-      totalDaysInMonth: new Date(year, month + 1, 0).getDate(),
-      monthName: now.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }),
-      todayDay: now.getDate(),
-    };
-  }, []);
+  const blueInDashboardCount = useMemo(() => {
+    let count = 0;
+    f.forEach((item) => {
+      if (diferencaConfirmadaSet.has(item.c)) count++;
+    });
+    s.forEach((item) => {
+      if (diferencaConfirmadaSet.has(item.c)) count++;
+    });
+    return count;
+  }, [f, s, diferencaConfirmadaSet]);
 
   const maxRows = Math.max(f.length, s.length);
 
@@ -637,6 +774,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         if (matchF || matchS) {
           list.push(i);
         }
+      } else if (statusFilter === 'diferenca_permaneceu') {
+        const matchF = rf && diferencaConfirmadaSet.has(rf.c);
+        const matchS = rs && diferencaConfirmadaSet.has(rs.c);
+        if (matchF || matchS) {
+          list.push(i);
+        }
       } else {
         const matchF = rf?.analysis?.status === statusFilter;
         const matchS = rs?.analysis?.status === statusFilter;
@@ -646,7 +789,54 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       }
     }
     return list;
-  }, [maxRows, f, s, statusFilter, matched021101Map]);
+  }, [maxRows, f, s, statusFilter, matched021101Map, diferencaConfirmadaSet]);
+
+  const handleQuantityClick = (
+    e: React.MouseEvent,
+    r: {
+      c: number;
+      d: string;
+      qtde: number;
+      valor: number;
+      peso: number;
+      analysis?: ItemAnalysis;
+    },
+    isFalta: boolean
+  ) => {
+    e.stopPropagation();
+    const now = Date.now();
+    const key = `${isFalta ? 'F' : 'S'}_${r.c}`;
+
+    if (qtyClickRef.current.timer) {
+      clearTimeout(qtyClickRef.current.timer);
+      qtyClickRef.current.timer = null;
+    }
+
+    if (qtyClickRef.current.key === key && now - qtyClickRef.current.lastTime < 650) {
+      qtyClickRef.current.count += 1;
+    } else {
+      qtyClickRef.current.key = key;
+      qtyClickRef.current.count = 1;
+    }
+    qtyClickRef.current.lastTime = now;
+
+    const clickCount = Math.max(qtyClickRef.current.count, e.detail || 1);
+
+    if (clickCount >= 3) {
+      qtyClickRef.current.count = 0;
+      onToggleDiferencaConfirmada?.(r.c, r.d);
+      return;
+    }
+
+    if (clickCount === 2) {
+      qtyClickRef.current.timer = setTimeout(() => {
+        qtyClickRef.current.count = 0;
+        qtyClickRef.current.timer = null;
+        handleDoubleClickQuantity(r, isFalta);
+      }, 320);
+      return;
+    }
+  };
 
   // Função para salvar o pop-up do produto na aba de POP-UPS SALVOS por duplo clique na QTDE
   const handleDoubleClickQuantity = (
@@ -721,6 +911,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     const filtered = items.filter((item) => {
       if (statusFilter === 'all') return true;
       if (statusFilter === 'recontagem_match') return matched021101Map.has(item.c);
+      if (statusFilter === 'diferenca_permaneceu') return diferencaConfirmadaSet.has(item.c);
       return item.analysis?.status === statusFilter;
     });
 
@@ -750,11 +941,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </td>
               </tr>
             ) : (
-              filtered.map((r) => (
+              filtered.map((r) => {
+                const isBlue = diferencaConfirmadaSet.has(r.c);
+                return (
                 <tr key={r.c}>
                   <td 
                     className="c"
-                    style={r.qtde === 0 ? { color: '#888' } : r.analysis ? { background: r.analysis.bg, color: r.analysis.color, fontWeight: 'bold' } : undefined}
+                    style={
+                      isBlue
+                        ? { background: '#BFDBFE', color: '#1E3A8A', fontWeight: 'bold' }
+                        : r.qtde === 0
+                        ? { color: '#888' }
+                        : r.analysis
+                        ? { background: r.analysis.bg, color: r.analysis.color, fontWeight: 'bold' }
+                        : undefined
+                    }
                   >
                     {r.rank}
                   </td>
@@ -764,6 +965,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       cursor: 'pointer',
                       fontWeight: 'bold',
                       userSelect: 'none',
+                      ...(isBlue ? { background: '#EFF6FF', color: '#1E3A8A' } : {}),
                     }}
                     onDoubleClick={(e) => {
                       e.stopPropagation();
@@ -796,31 +998,71 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       )}
                     </div>
                   </td>
-                  <td title={r.d}>{r.d}</td>
+                  <td
+                    title={isBlue ? `${r.d}\n🔵 Diferença permaneceu — não precisa contar novamente.` : r.d}
+                    style={isBlue ? { background: '#EFF6FF', color: '#1E3A8A', fontWeight: '600' } : undefined}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                      <span>{r.d}</span>
+                      {isBlue && (
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            padding: '1px 5px',
+                            borderRadius: '3px',
+                            background: '#2563EB',
+                            color: '#ffffff',
+                            fontSize: '8px',
+                            fontWeight: 800,
+                            letterSpacing: '0.2px',
+                          }}
+                        >
+                          PERMANECEU • NÃO RECONTAR
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td 
                     className="c font-mono"
-                    title="Dê DUPLO CLIQUE para salvar este pop-up na aba POP-UPS SALVOS"
-                    style={r.qtde === 0 ? { color: '#888', background: 'transparent' } : r.analysis ? { background: r.analysis.bg, color: r.analysis.color, fontWeight: 'bold', cursor: 'pointer' } : undefined}
+                    title={
+                      isBlue
+                        ? "🔵 DIFERENÇA PERMANECEU — NÃO PRECISA CONTAR NOVAMENTE\n• Clique 3x na quantidade para remover a marcação azul\n• Clique 2x para salvar o pop-up em POP-UPS SALVOS"
+                        : "Dê DUPLO CLIQUE para salvar este pop-up em POP-UPS SALVOS\nDê TRIPLO CLIQUE (3x) para marcar em AZUL (diferença permaneceu / não precisa contar novamente)"
+                    }
+                    style={{
+                      userSelect: 'none',
+                      ...(isBlue
+                        ? { background: '#2563EB', color: '#FFFFFF', fontWeight: 'bold', cursor: 'pointer' }
+                        : r.qtde === 0
+                        ? { color: '#888', background: 'transparent', cursor: 'pointer' }
+                        : r.analysis
+                        ? { background: r.analysis.bg, color: r.analysis.color, fontWeight: 'bold', cursor: 'pointer' }
+                        : { cursor: 'pointer' }),
+                    }}
                     onMouseEnter={(e) => handleQuantityMouseEnter(e, r, isFalta)}
                     onMouseLeave={handleQuantityMouseLeave}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      handleDoubleClickQuantity(r, isFalta);
-                    }}
+                    onClick={(e) => handleQuantityClick(e, r, isFalta)}
                   >
                     {N(r.qtde)}
                   </td>
-                  <td>
+                  <td style={isBlue ? { background: '#EFF6FF' } : undefined}>
                     <RenderMoney value={r.valor} />
                   </td>
                   <td 
-                    className="p"
-                    style={r.analysis ? { background: r.analysis.bg, color: r.analysis.color, fontWeight: 'bold' } : { background: colorScale(r.peso) }}
+                    className="p" 
+                    style={
+                      isBlue
+                        ? { background: '#BFDBFE', color: '#1E3A8A', fontWeight: 'bold' }
+                        : r.analysis
+                        ? { background: r.analysis.bg, color: r.analysis.color, fontWeight: 'bold' }
+                        : { background: colorScale(r.peso) }
+                    }
                   >
                     {Math.round(r.peso * 100)}%
                   </td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>
@@ -968,6 +1210,54 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span>Recontagem Confirmada ({matchedInDashboardCount})</span>
             </button>
           )}
+
+          {/* Botão: Diferença Permaneceu / Não Recontar (Azul - 3 cliques na QTDE) */}
+          {blueInDashboardCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setStatusFilter(statusFilter === 'diferenca_permaneceu' ? 'all' : 'diferenca_permaneceu')}
+              style={{
+                padding: '3px 9px',
+                fontSize: '10.5px',
+                borderRadius: '10px',
+                border: statusFilter === 'diferenca_permaneceu' ? '2px solid #1D4ED8' : '1.5px solid #3B82F6',
+                background: statusFilter === 'diferenca_permaneceu' ? '#2563EB' : '#DBEAFE',
+                color: statusFilter === 'diferenca_permaneceu' ? '#ffffff' : '#1E3A8A',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                boxShadow: statusFilter === 'diferenca_permaneceu' ? '0 0 0 2px rgba(37,99,235,0.3)' : '0 1px 2px rgba(0,0,0,0.05)',
+              }}
+              title="AZUL: Itens marcados com 3 cliques na QTDE — diferença permaneceu e não precisa contar novamente"
+            >
+              <span>🔵</span>
+              <span>Permaneceu / Não Contar ({blueInDashboardCount})</span>
+            </button>
+          )}
+          {selectedDay === null &&
+            latestPriorDailyRecord?.dateKey === todayDateKey &&
+            latestPriorDailyRecord?.sourceAction === 'CONGELAR' && (
+              <span
+                style={{
+                  padding: '3px 9px',
+                  fontSize: '10.5px',
+                  borderRadius: '10px',
+                  border: '1px solid #0284C7',
+                  background: '#E0F2FE',
+                  color: '#0369A1',
+                  fontWeight: 'bold',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+                title={`Conciliação e 02.05.02 congeladas hoje (${latestPriorDailyRecord.dateBR} às ${latestPriorDailyRecord.savedAt}). Comparando ao vivo contra o congelamento de hoje.`}
+              >
+                <span>❄️</span>
+                <span>Congelado Hoje ({latestPriorDailyRecord.savedAt})</span>
+              </span>
+            )}
         </div>
 
         {/* CONTROLES DE VISUALIZAÇÃO E AUDITORIA */}
@@ -1168,8 +1458,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <div>
               <div style={{ fontSize: '13px', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span>CONSULTANDO DASHBOARD HISTÓRICO DO DIA {selectedDay} DE OUTUBRO</span>
-                {selectedDay === 14 && (
+                <span>CONSULTANDO DASHBOARD HISTÓRICO DO DIA {selectedDay} ({monthName.toUpperCase()})</span>
+                {selectedDay === todayDay - 1 && (
                   <span style={{ background: '#F59E0B', color: '#000', fontSize: '9.5px', padding: '1px 6px', borderRadius: '3px', fontWeight: 'bold' }}>
                     ONTEM
                   </span>
@@ -1224,11 +1514,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '15px' }}>📋</span>
-          <span style={{ fontSize: '11px', color: '#92400E' }}>
-            <b>RECONTAGEM DE ITENS:</b> Dê <b>duplo clique</b> no código (<b>COD</b>) de qualquer produto para enviá-lo à aba de <b>Recontagem</b>.
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '15px' }}>📋</span>
+            <span style={{ fontSize: '11px', color: '#92400E' }}>
+              <b>RECONTAGEM DE ITENS:</b> Dê <b>duplo clique</b> no código (<b>COD</b>) de qualquer produto para enviá-lo à aba de <b>Recontagem</b>.
+            </span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <span style={{ fontSize: '12px' }}>🔵</span>
+            <span style={{ fontSize: '11px', color: '#1E40AF' }}>
+              <b>NÃO CONTAR NOVAMENTE:</b> Clique <b>3 vezes na QTDE</b> para marcar em <b>AZUL</b> (diferença permaneceu).
+            </span>
+          </div>
         </div>
       </div>
 
@@ -1379,6 +1677,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   visibleIndices.map((i) => {
                     const rf = f[i];
                     const rs = s[i];
+                    const isBlueF = rf ? diferencaConfirmadaSet.has(rf.c) : false;
+                    const isBlueS = rs ? diferencaConfirmadaSet.has(rs.c) : false;
 
                     return (
                       <tr key={i}>
@@ -1388,25 +1688,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             <td 
                               className="c" 
                               style={
-                                rf.qtde === 0
+                                isBlueF
+                                  ? { background: '#BFDBFE', color: '#1E3A8A', fontWeight: 'bold' }
+                                  : rf.qtde === 0
                                   ? { color: '#888' }
                                   : rf.analysis 
                                   ? { 
                                       background: rf.analysis.bg, 
                                       color: rf.analysis.color, 
                                       fontWeight: 'bold',
-                                      cursor: rf.analysis.status !== 'verde' ? 'pointer' : 'default',
                                     } 
                                   : undefined
                               }
-                              onClick={() => {
-                                if (rf.qtde > 0 && rf.analysis && rf.analysis.status !== 'verde' && onOpenAnalise) {
-                                  onOpenAnalise(rf.analysis.status, rf.c);
-                                }
-                              }}
                               title={
-                                rf.analysis 
-                                  ? `Análise Automática vs Dia Anterior:\n• Hoje: ${rf.analysis.hoje} cx\n• Ontem: ${rf.analysis.ontem} cx\n• Divergência: ${rf.analysis.diff} cx (${rf.analysis.label})${rf.analysis.status !== 'verde' ? '\n• Clique para auditar minuciosamente de onde veio cada real de divergência!' : ''}` 
+                                isBlueF
+                                  ? '🔵 Diferença permaneceu — não precisa contar novamente'
+                                  : rf.analysis 
+                                  ? `Análise Automática vs Dia Anterior:\n• Hoje: ${rf.analysis.hoje} cx\n• Ontem: ${rf.analysis.ontem} cx\n• Divergência: ${rf.analysis.diff} cx (${rf.analysis.label})` 
                                   : undefined
                               }
                             >
@@ -1418,6 +1716,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 cursor: 'pointer',
                                 fontWeight: 'bold',
                                 userSelect: 'none',
+                                ...(isBlueF ? { background: '#EFF6FF', color: '#1E3A8A' } : {}),
                               }}
                               onDoubleClick={(e) => {
                                 e.stopPropagation();
@@ -1451,13 +1750,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                               </div>
                             </td>
                             <td 
-                              title={`${rf.d}\nClique para opções do produto (Recontar / Desativar da plataforma por inteiro)`} 
+                              title={
+                                isBlueF
+                                  ? `${rf.d}\n🔵 Diferença permaneceu — não precisa contar novamente.\nClique para opções do produto`
+                                  : `${rf.d}\nClique para opções do produto (Recontar / Desativar da plataforma por inteiro)`
+                              }
                               style={{ 
                                 maxWidth: '165px', 
                                 overflow: 'hidden', 
                                 textOverflow: 'ellipsis', 
                                 whiteSpace: 'nowrap',
                                 cursor: 'pointer',
+                                ...(isBlueF ? { background: '#EFF6FF', color: '#1E3A8A', fontWeight: '600' } : {}),
                               }}
                               onClick={() => setSelectedItemForAction({
                                 code: rf.c,
@@ -1467,16 +1771,46 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 isFalta: true,
                               })}
                             >
-                              <span style={{ textDecoration: 'underline dotted #94a3b8', textUnderlineOffset: '2px' }}>
-                                {rf.d}
-                              </span>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', overflow: 'hidden' }}>
+                                <span style={{ textDecoration: 'underline dotted #94a3b8', textUnderlineOffset: '2px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                  {rf.d}
+                                </span>
+                                {isBlueF && (
+                                  <span
+                                    style={{
+                                      flexShrink: 0,
+                                      padding: '0px 4px',
+                                      borderRadius: '3px',
+                                      background: '#2563EB',
+                                      color: '#ffffff',
+                                      fontSize: '7.5px',
+                                      fontWeight: 800,
+                                    }}
+                                    title="Diferença permaneceu — não precisa contar novamente"
+                                  >
+                                    NÃO CONTAR
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td 
                               className="c font-mono"
-                              title="Dê DUPLO CLIQUE para salvar este pop-up na aba POP-UPS SALVOS"
-                              style={
-                                rf.qtde === 0
-                                  ? { color: '#888', background: 'transparent' }
+                              title={
+                                isBlueF
+                                  ? "🔵 DIFERENÇA PERMANECEU — NÃO PRECISA CONTAR NOVAMENTE\n• Clique 3x na quantidade para remover a marcação azul\n• Clique 2x para salvar este pop-up em POP-UPS SALVOS"
+                                  : "Dê DUPLO CLIQUE para salvar este pop-up na aba POP-UPS SALVOS\nDê TRIPLO CLIQUE (3x) para marcar em AZUL (diferença permaneceu / não precisa contar novamente)"
+                              }
+                              style={{
+                                userSelect: 'none',
+                                ...(isBlueF
+                                  ? {
+                                      background: '#2563EB',
+                                      color: '#FFFFFF',
+                                      fontWeight: 'bold',
+                                      cursor: 'pointer',
+                                    }
+                                  : rf.qtde === 0
+                                  ? { color: '#888', background: 'transparent', cursor: 'pointer' }
                                   : rf.analysis 
                                   ? { 
                                       background: rf.analysis.bg, 
@@ -1484,34 +1818,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                       fontWeight: 'bold',
                                       cursor: 'pointer',
                                     } 
-                                  : undefined
-                              }
-                              onClick={() => {
-                                if (rf.analysis && rf.analysis.status !== 'verde' && onOpenAnalise) {
-                                  onOpenAnalise(rf.analysis.status, rf.c);
-                                }
+                                  : { cursor: 'pointer' }),
                               }}
-                              onDoubleClick={(e) => {
-                                e.stopPropagation();
-                                handleDoubleClickQuantity(rf, true);
-                              }}
+                              onClick={(e) => handleQuantityClick(e, rf, true)}
                               onMouseEnter={(e) => handleQuantityMouseEnter(e, rf, true)}
                               onMouseLeave={handleQuantityMouseLeave}
                             >
                               {N(rf.qtde)}
                             </td>
-                            <td style={{ width: '86px', padding: '1px 3px' }}>
+                            <td style={{ width: '86px', padding: '1px 3px', ...(isBlueF ? { background: '#EFF6FF' } : {}) }}>
                               <RenderMoney value={rf.valor} />
                             </td>
                             <td 
                               className="p" 
                               style={
-                                rf.analysis 
+                                isBlueF
+                                  ? { background: '#BFDBFE', color: '#1E3A8A', fontWeight: 'bold' }
+                                  : rf.analysis 
                                   ? { background: rf.analysis.bg, color: rf.analysis.color, fontWeight: 'bold' } 
                                   : { background: cf(rf.peso) }
                               }
                               title={
-                                rf.analysis 
+                                isBlueF
+                                  ? '🔵 Diferença permaneceu — não precisa contar novamente'
+                                  : rf.analysis 
                                   ? `Análise vs Ontem: ${rf.analysis.label} (Divergência: ${rf.analysis.diff} cx)` 
                                   : undefined
                               }
@@ -1533,25 +1863,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             <td 
                               className="c" 
                               style={
-                                rs.qtde === 0
+                                isBlueS
+                                  ? { background: '#BFDBFE', color: '#1E3A8A', fontWeight: 'bold' }
+                                  : rs.qtde === 0
                                   ? { color: '#888' }
                                   : rs.analysis 
                                   ? { 
                                       background: rs.analysis.bg, 
                                       color: rs.analysis.color, 
                                       fontWeight: 'bold',
-                                      cursor: rs.analysis.status !== 'verde' ? 'pointer' : 'default',
                                     } 
                                   : undefined
                               }
-                              onClick={() => {
-                                if (rs.qtde > 0 && rs.analysis && rs.analysis.status !== 'verde' && onOpenAnalise) {
-                                  onOpenAnalise(rs.analysis.status, rs.c);
-                                }
-                              }}
                               title={
-                                rs.analysis 
-                                  ? `Análise Automática vs Dia Anterior:\n• Hoje: ${rs.analysis.hoje} cx\n• Ontem: ${rs.analysis.ontem} cx\n• Divergência: ${rs.analysis.diff} cx (${rs.analysis.label})${rs.analysis.status !== 'verde' ? '\n• Clique para auditar minuciosamente de onde veio cada real de divergência!' : ''}` 
+                                isBlueS
+                                  ? '🔵 Diferença permaneceu — não precisa contar novamente'
+                                  : rs.analysis 
+                                  ? `Análise Automática vs Dia Anterior:\n• Hoje: ${rs.analysis.hoje} cx\n• Ontem: ${rs.analysis.ontem} cx\n• Divergência: ${rs.analysis.diff} cx (${rs.analysis.label})` 
                                   : undefined
                               }
                             >
@@ -1563,6 +1891,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 cursor: 'pointer',
                                 fontWeight: 'bold',
                                 userSelect: 'none',
+                                ...(isBlueS ? { background: '#EFF6FF', color: '#1E3A8A' } : {}),
                               }}
                               onDoubleClick={(e) => {
                                 e.stopPropagation();
@@ -1596,13 +1925,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                               </div>
                             </td>
                             <td 
-                              title={`${rs.d}\nClique para opções do produto (Recontar / Desativar da plataforma por inteiro)`} 
+                              title={
+                                isBlueS
+                                  ? `${rs.d}\n🔵 Diferença permaneceu — não precisa contar novamente.\nClique para opções do produto`
+                                  : `${rs.d}\nClique para opções do produto (Recontar / Desativar da plataforma por inteiro)`
+                              }
                               style={{ 
                                 maxWidth: '165px', 
                                 overflow: 'hidden', 
                                 textOverflow: 'ellipsis', 
                                 whiteSpace: 'nowrap',
                                 cursor: 'pointer',
+                                ...(isBlueS ? { background: '#EFF6FF', color: '#1E3A8A', fontWeight: '600' } : {}),
                               }}
                               onClick={() => setSelectedItemForAction({
                                 code: rs.c,
@@ -1612,16 +1946,46 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 isFalta: false,
                               })}
                             >
-                              <span style={{ textDecoration: 'underline dotted #94a3b8', textUnderlineOffset: '2px' }}>
-                                {rs.d}
-                              </span>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', overflow: 'hidden' }}>
+                                <span style={{ textDecoration: 'underline dotted #94a3b8', textUnderlineOffset: '2px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                  {rs.d}
+                                </span>
+                                {isBlueS && (
+                                  <span
+                                    style={{
+                                      flexShrink: 0,
+                                      padding: '0px 4px',
+                                      borderRadius: '3px',
+                                      background: '#2563EB',
+                                      color: '#ffffff',
+                                      fontSize: '7.5px',
+                                      fontWeight: 800,
+                                    }}
+                                    title="Diferença permaneceu — não precisa contar novamente"
+                                  >
+                                    NÃO CONTAR
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td 
                               className="c font-mono"
-                              title="Dê DUPLO CLIQUE para salvar este pop-up na aba POP-UPS SALVOS"
-                              style={
-                                rs.qtde === 0
-                                  ? { color: '#888', background: 'transparent' }
+                              title={
+                                isBlueS
+                                  ? "🔵 DIFERENÇA PERMANECEU — NÃO PRECISA CONTAR NOVAMENTE\n• Clique 3x na quantidade para remover a marcação azul\n• Clique 2x para salvar este pop-up em POP-UPS SALVOS"
+                                  : "Dê DUPLO CLIQUE para salvar este pop-up na aba POP-UPS SALVOS\nDê TRIPLO CLIQUE (3x) para marcar em AZUL (diferença permaneceu / não precisa contar novamente)"
+                              }
+                              style={{
+                                userSelect: 'none',
+                                ...(isBlueS
+                                  ? {
+                                      background: '#2563EB',
+                                      color: '#FFFFFF',
+                                      fontWeight: 'bold',
+                                      cursor: 'pointer',
+                                    }
+                                  : rs.qtde === 0
+                                  ? { color: '#888', background: 'transparent', cursor: 'pointer' }
                                   : rs.analysis 
                                   ? { 
                                       background: rs.analysis.bg, 
@@ -1629,34 +1993,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                       fontWeight: 'bold',
                                       cursor: 'pointer',
                                     } 
-                                  : undefined
-                              }
-                              onClick={() => {
-                                if (rs.analysis && rs.analysis.status !== 'verde' && onOpenAnalise) {
-                                  onOpenAnalise(rs.analysis.status, rs.c);
-                                }
+                                  : { cursor: 'pointer' }),
                               }}
-                              onDoubleClick={(e) => {
-                                e.stopPropagation();
-                                handleDoubleClickQuantity(rs, false);
-                              }}
+                              onClick={(e) => handleQuantityClick(e, rs, false)}
                               onMouseEnter={(e) => handleQuantityMouseEnter(e, rs, false)}
                               onMouseLeave={handleQuantityMouseLeave}
                             >
                               {N(rs.qtde)}
                             </td>
-                            <td style={{ width: '86px', padding: '1px 3px' }}>
+                            <td style={{ width: '86px', padding: '1px 3px', ...(isBlueS ? { background: '#EFF6FF' } : {}) }}>
                               <RenderMoney value={rs.valor} />
                             </td>
                             <td 
                               className="p" 
                               style={
-                                rs.analysis 
+                                isBlueS
+                                  ? { background: '#BFDBFE', color: '#1E3A8A', fontWeight: 'bold' }
+                                  : rs.analysis 
                                   ? { background: rs.analysis.bg, color: rs.analysis.color, fontWeight: 'bold' } 
                                   : { background: cs(rs.peso) }
                               }
                               title={
-                                rs.analysis 
+                                isBlueS
+                                  ? '🔵 Diferença permaneceu — não precisa contar novamente'
+                                  : rs.analysis 
                                   ? `Análise vs Ontem: ${rs.analysis.label} (Divergência: ${rs.analysis.diff} cx)` 
                                   : undefined
                               }
@@ -1786,6 +2146,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               className="btn" 
               onClick={onCongelar}
               style={{ flex: 1, padding: '7px 6px', fontSize: '11px' }}
+              title="Finalizar conciliação: congela a DIF Diária e envia o fechamento para a DIF Mensal"
             >
               CONGELAR
             </button>
@@ -2124,7 +2485,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         saldoFinal={sd}
         colorScaleF={cf}
         colorScaleS={cs}
-        dateLabel={selectedDay !== null ? `Dia ${selectedDay} de Outubro` : undefined}
+        dateLabel={selectedDay !== null ? `Dia ${selectedDay} (${monthName})` : undefined}
       />
 
       {/* POPUP DE LEMBRETE: ROTINA DE DEVOLUÇÃO 02-01-06 */}
@@ -2351,6 +2712,29 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
 
+          {/* Alerta de Marcação Azul (3 cliques na QTDE: Diferença Permaneceu / Não Recontar) */}
+          {diferencaConfirmadaSet.has(hoveredItem.code) && (
+            <div
+              style={{
+                background: '#EFF6FF',
+                border: '1.5px solid #2563EB',
+                borderRadius: '6px',
+                padding: '7px 10px',
+                marginBottom: '10px',
+                color: '#1E3A8A',
+                fontSize: '11px',
+              }}
+            >
+              <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                <span>🔵</span>
+                <span>DIFERENÇA PERMANECEU — NÃO PRECISA CONTAR NOVAMENTE</span>
+              </div>
+              <div style={{ marginTop: '2px', fontSize: '10.5px', color: '#1D4ED8' }}>
+                Item marcado manualmente com 3 cliques na quantidade. Clique 3x novamente para desmarcar.
+              </div>
+            </div>
+          )}
+
           {/* Alerta de Recontagem Confirmada / Diferença Permaneceu */}
           {matched021101Map.has(hoveredItem.code) && (() => {
             const m = matched021101Map.get(hoveredItem.code)!;
@@ -2382,7 +2766,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           {/* Painel Comparativo Principal (Ontem vs Hoje vs Variação) */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '12px' }}>
             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '7px', padding: '8px 6px', textAlign: 'center' }}>
-              <span style={{ display: 'block', fontSize: '10.5px', color: '#64748b', fontWeight: '600', textTransform: 'uppercase' }}>Ontem</span>
+              <span style={{ display: 'block', fontSize: '10.5px', color: '#64748b', fontWeight: '600', textTransform: 'uppercase' }}>
+                {selectedDay === null && latestPriorDailyRecord
+                  ? latestPriorDailyRecord.dateKey === todayDateKey
+                    ? `Cong. (${latestPriorDailyRecord.dateBR.slice(0, 5)})`
+                    : `Últ. (${latestPriorDailyRecord.dateBR.slice(0, 5)})`
+                  : selectedDay === null && lastRecordedMenDay > 0 && lastRecordedMenDay !== todayDay - 1
+                  ? `Últ. (D${lastRecordedMenDay})`
+                  : 'Ontem'}
+              </span>
               <strong style={{ fontSize: '16px', color: '#334155', display: 'block', marginTop: '2px' }}>
                 {hoveredItem.analysis.ontem} <small style={{ fontSize: '10px', fontWeight: 'normal' }}>cx</small>
               </strong>
@@ -2454,7 +2846,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           >
             <div>
               <span style={{ display: 'block', fontSize: '10px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                Impacto da Variação (Ontem → Hoje)
+                Impacto da Variação ({selectedDay === null && latestPriorDailyRecord ? (latestPriorDailyRecord.dateKey === todayDateKey ? `Cong. ${latestPriorDailyRecord.dateBR.slice(0, 5)}` : latestPriorDailyRecord.dateBR.slice(0, 5)) : selectedDay === null && lastRecordedMenDay > 0 && lastRecordedMenDay !== todayDay - 1 ? `Dia ${lastRecordedMenDay}` : 'Ontem'} → Hoje)
               </span>
               <strong
                 style={{
@@ -2545,6 +2937,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           {/* Dica de Ação */}
           <div style={{ fontSize: '10.5px', color: '#64748b', textAlign: 'center', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ color: '#2563EB', fontWeight: 'bold' }}>
+              🔵 Clique 3x na quantidade para marcar/desmarcar em AZUL (diferença permaneceu / não contar)
+            </span>
             <span style={{ color: '#7C3AED', fontWeight: 'bold' }}>
               📌 Dê DUPLO CLIQUE na quantidade para salvar este pop-up na aba POP-UPS SALVOS
             </span>

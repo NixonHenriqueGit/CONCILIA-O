@@ -62,6 +62,8 @@ export const CheckLancamentoGradeView: React.FC<CheckLancamentoGradeViewProps> =
 
   const [isPasteModalOpen, setIsPasteModalOpen] = useState(false);
   const [pastedText, setPastedText] = useState('');
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [pasteError, setPasteError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'divergencias' | 'nao_lancado' | 'correto'>('all');
@@ -100,10 +102,11 @@ export const CheckLancamentoGradeView: React.FC<CheckLancamentoGradeViewProps> =
 
   // Upload de arquivo
   const handleFileUpload = async (file: File) => {
+    setUploadError(null);
     try {
       const parsed = await parseLancamentoGradeFile(file);
       if (parsed.items.length === 0) {
-        alert('Nenhum produto válido encontrado no arquivo. Verifique o formato.');
+        setUploadError('Nenhum produto válido encontrado no arquivo. Verifique o formato.');
         return;
       }
       updateLaunchedData({
@@ -112,21 +115,23 @@ export const CheckLancamentoGradeView: React.FC<CheckLancamentoGradeViewProps> =
         checkedAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       });
     } catch (e: any) {
-      alert(`Erro ao ler arquivo: ${e.message || e}`);
+      setUploadError(`Erro ao ler arquivo: ${e.message || e}`);
     }
   };
 
   // Processamento de texto colado
   const handleProcessPastedText = () => {
+    setPasteError(null);
     if (!pastedText.trim()) {
-      alert('Cole o texto ou planilha da grade antes de confirmar.');
+      setPasteError('Cole o texto ou planilha da grade antes de confirmar.');
       return;
     }
     const parsed = parseLancamentoText(pastedText, 'Texto Colado Manualmente');
     if (parsed.items.length === 0) {
-      alert('Não foi possível identificar códigos e quantidades no texto colado.');
+      setPasteError('Não foi possível identificar códigos e quantidades no texto colado.');
       return;
     }
+    setUploadError(null);
     updateLaunchedData({
       items: parsed.items,
       fileName: 'Texto Colado Manualmente',
@@ -407,6 +412,20 @@ export const CheckLancamentoGradeView: React.FC<CheckLancamentoGradeViewProps> =
           </div>
         </div>
       </div>
+
+      {/* ERRO INLINE DE IMPORTAÇÃO */}
+      {uploadError && (
+        <div className="mb-4 px-4 py-2.5 bg-rose-50 border border-rose-300 text-rose-800 rounded-lg text-xs font-bold flex items-center justify-between gap-2">
+          <span>⚠️ {uploadError}</span>
+          <button
+            type="button"
+            onClick={() => setUploadError(null)}
+            className="text-rose-700 hover:text-rose-950 font-black px-1.5"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* ÁREA DE STATUS SE HOUVER CHECK CARREGADO */}
       {launchedData ? (
@@ -826,11 +845,20 @@ export const CheckLancamentoGradeView: React.FC<CheckLancamentoGradeViewProps> =
 
             <textarea
               value={pastedText}
-              onChange={(e) => setPastedText(e.target.value)}
+              onChange={(e) => {
+                setPastedText(e.target.value);
+                if (pasteError) setPasteError(null);
+              }}
               placeholder="Cole aqui o conteúdo copiado (Ctrl+V)..."
               rows={8}
               className="w-full p-3 font-mono text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3 bg-slate-50"
             />
+
+            {pasteError && (
+              <div className="mb-3 px-3 py-2 bg-rose-50 border border-rose-300 text-rose-800 rounded-md text-xs font-bold">
+                ⚠️ {pasteError}
+              </div>
+            )}
 
             <div className="flex items-center justify-end gap-2">
               <button

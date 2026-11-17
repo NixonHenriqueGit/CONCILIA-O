@@ -31,29 +31,36 @@ export const SaveDaily020502Modal: React.FC<SaveDaily020502ModalProps> = ({
   const [dateStr, setDateStr] = useState(initialDate || getTodayStr());
   const [label, setLabel] = useState('Fechamento Final do Dia');
   const [replaceExisting, setReplaceExisting] = useState(true);
+  const [dateError, setDateError] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setDateStr(initialDate || getTodayStr());
       setLabel(`Fechamento ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`);
+      setDateError(null);
     }
   }, [isOpen, initialDate]);
 
   if (!isOpen) return null;
 
-  // Calcula totais atuais do Dashboard
-  const faltas = calculated.filter((p) => p.W < 0);
-  const sobras = calculated.filter((p) => p.W > 0);
+  // Calcula totais atuais do Dashboard (usando diferença financeira S e filtrando desativados/xs)
+  const desativadosSet = new Set(data.desativados || []);
+  const xsSet = new Set(data.xs || []);
+  const active = calculated.filter((p) => !desativadosSet.has(p.c) && !p.desativado);
 
-  const tf = faltas.reduce((acc, p) => acc + p.W, 0);
-  const ts = sobras.reduce((acc, p) => acc + p.W, 0);
-  const sd = tf + ts;
+  const faltas = active.filter((p) => p.R < 0 || p.S < 0);
+  const sobras = active.filter((p) => (p.R > 0 || p.S > 0) && !xsSet.has(p.c));
+
+  const tf = faltas.reduce((acc, p) => acc + Math.max(0, -p.S), 0);
+  const ts = sobras.reduce((acc, p) => acc + Math.max(0, p.S), 0);
+  const sd = ts - tf;
 
   const handleConfirm = () => {
     if (!dateStr) {
-      alert('Selecione uma data para o fechamento.');
+      setDateError('Selecione uma data para o fechamento.');
       return;
     }
+    setDateError(null);
 
     const timestamp = Date.now();
     const id = replaceExisting
@@ -151,11 +158,14 @@ export const SaveDaily020502Modal: React.FC<SaveDaily020502ModalProps> = ({
               <input
                 type="date"
                 value={dateStr}
-                onChange={(e) => setDateStr(e.target.value)}
+                onChange={(e) => {
+                  setDateStr(e.target.value);
+                  if (dateError) setDateError(null);
+                }}
                 style={{
                   flex: 1,
                   padding: '7px 10px',
-                  border: '1.5px solid #CBD5E1',
+                  border: dateError ? '1.5px solid #DC2626' : '1.5px solid #CBD5E1',
                   borderRadius: '5px',
                   fontSize: '13px',
                   fontWeight: 600,
@@ -164,7 +174,10 @@ export const SaveDaily020502Modal: React.FC<SaveDaily020502ModalProps> = ({
               />
               <button
                 type="button"
-                onClick={() => setDateStr(getTodayStr())}
+                onClick={() => {
+                  setDateStr(getTodayStr());
+                  if (dateError) setDateError(null);
+                }}
                 style={{
                   background: '#F1F5F9',
                   border: '1px solid #CBD5E1',
@@ -179,6 +192,11 @@ export const SaveDaily020502Modal: React.FC<SaveDaily020502ModalProps> = ({
                 Hoje
               </button>
             </div>
+            {dateError && (
+              <div style={{ marginTop: '4px', fontSize: '11px', fontWeight: 'bold', color: '#DC2626' }}>
+                ⚠️ {dateError}
+              </div>
+            )}
           </div>
 
           {/* Identificação / Rótulo */}

@@ -1,7 +1,39 @@
 import * as XLSX from 'xlsx';
-import { RawData, ResRow, DiaRow } from '../data/types';
+import { RawData, ResRow } from '../data/types';
 import { calculateProducts, sum } from './calc';
 import { Rt } from './formatters';
+import { computeEcContentHash } from '../firebase';
+import { getEffectiveProductPrice } from '../data/fixedPrices';
+
+/**
+ * Divide uma linha delimitada respeitando aspas duplas (ex.: campos do Excel com ; ou , internos).
+ */
+export function splitDelimitedLine(line: string, sep: string): string[] {
+  if (!line) return [];
+  const result: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (!inQuotes && line.startsWith(sep, i)) {
+      result.push(cur.trim());
+      cur = '';
+      i += sep.length - 1;
+    } else {
+      cur += ch;
+    }
+  }
+  result.push(cur.trim());
+  return result;
+}
 
 export interface Import020502Result {
   success: boolean;
@@ -243,9 +275,21 @@ export function process020502(
     sep = '|';
   }
 
-  const allRows = lines.map((l) =>
-    l.split(sep).map((c) => c.trim().replace(/^"|"$/g, '').trim())
-  );
+  const allRows = lines.map((l) => splitDelimitedLine(l, sep));
+
+  return process020502Rows(allRows, nome, currentData, targetTab);
+}
+
+export function process020502Rows(
+  allRowsInput: (string | number)[][],
+  nome: string,
+  currentData: RawData,
+  targetTab: 'dashboard' | 'ec' | 'grade' | 'all' = 'dashboard',
+  hasPreSeparatedHeader?: string[]
+): Import020502Result {
+  const allRows = hasPreSeparatedHeader && hasPreSeparatedHeader.length > 0
+    ? [hasPreSeparatedHeader.map((h) => String(h ?? '')), ...allRowsInput]
+    : allRowsInput;
 
   // Procura a linha de cabeçalho
   let headerIndex = -1;
@@ -254,9 +298,10 @@ export function process020502(
   let it = -1; // Unidade / Tipo
   let ie = -1; // Qtd Estoque / Saldo Atual
   let ic = -1; // Qtd Contagem / Inventário
+  let ifator = -1; // Fator de embalagem
 
   for (let i = 0; i < Math.min(allRows.length, 30); i++) {
-    const rowNorm = allRows[i].map(normalizeStr);
+    const rowNorm = allRows[i].map((c) => normalizeStr(String(c ?? '')));
     const pIdx = rowNorm.findIndex(
       (c) =>
         c === 'produto' ||
@@ -272,6 +317,9 @@ export function process020502(
     );
     const tIdx = rowNorm.findIndex(
       (c) => c === 'unidade' || c === 'un' || c === 'und' || c === 'tipo'
+    );
+    const fIdx = rowNorm.findIndex(
+      (c) => c === 'fator' || c === 'fator cx' || c === 'fator embalagem'
     );
     
     // Qtd Estoque / Disponível
@@ -303,6 +351,7 @@ export function process020502(
       it = tIdx >= 0 ? tIdx : pIdx + 2;
       ie = eIdx >= 0 ? eIdx : -1;
       ic = cIdx >= 0 ? cIdx : -1;
+      ifator = fIdx >= 0 ? fIdx : -1;
       break;
     }
   }
@@ -311,7 +360,7 @@ export function process020502(
   let header: string[];
 
   if (headerIndex >= 0) {
-    header = allRows[headerIndex];
+    header = allRows[headerIndex].map((h) => String(h ?? ''));
     body = allRows.slice(headerIndex + 1);
   } else {
     // Fallback padrão relatório Promax 02.05.02
@@ -320,11 +369,14 @@ export function process020502(
     it = 5;
     ie = 27;
     ic = 28;
-    header = currentData.ec?.h || [];
-    body = allRows;
+    ifator = 23;
+    header = hasPreSeparatedHeader && hasPreSeparatedHeader.length > 0
+      ? hasPreSeparatedHeader
+      : (currentData.ec?.h || []);
+    body = hasPreSeparatedHeader && hasPreSeparatedHeader.length > 0 ? allRowsInput : allRows;
   }
 
-  // Se ie ou ic não foram achados no cabeçalho, procura se existem as colunas 27/28 ou 11/12
+  // Se ie, ic ou ifator não foram achados no cabeçalho, procura nas colunas padrão Promax
   if (ie < 0) {
     if (body.some((r) => r.length > 27)) ie = 27;
     else if (body.some((r) => r.length > 11)) ie = 11;
@@ -332,6 +384,9 @@ export function process020502(
   if (ic < 0) {
     if (body.some((r) => r.length > 28)) ic = 28;
     else if (body.some((r) => r.length > 12)) ic = 12;
+  }
+  if (ifator < 0 && body.some((r) => r.length > 23)) {
+    ifator = 23;
   }
 
   // Se a coluna de produto não foi encontrada ou é inválida, localiza a coluna que mais possui códigos de produto
@@ -351,6 +406,7 @@ export function process020502(
     it = 5;
     if (ie < 0) ie = body.some((r) => r.length > 27) ? 27 : 11;
     if (ic < 0) ic = body.some((r) => r.length > 28) ? 28 : 12;
+    if (ifator < 0 && body.some((r) => r.length > 23)) ifator = 23;
   } else if (ip < 0) {
     const maxCols = Math.max(...sampleData.map((r) => r.length), 0);
     let bestCol = -1;
@@ -428,6 +484,7 @@ export function process020502(
     {
       estoque: number;
       contagem: number;
+      fator: number;
       desc: string;
       tipo: string;
       rawRow: (string | number)[];
@@ -438,13 +495,18 @@ export function process020502(
     const rawCode = String(r[ip] || '').trim().replace(/^0+/, '');
     const code = Number(rawCode);
     if (!isNaN(code) && code > 0) {
-      // Identifica o fator da embalagem
-      let factor = resFactorMap.get(code);
-      if (!factor && r.length > 23) {
+      // Identifica o fator oficial da embalagem diretamente do 02.05.02 (Coluna Fator / índice 23)
+      let factor = 0;
+      if (ifator >= 0 && r.length > ifator) {
+        const parsedF = Number(r[ifator]);
+        if (!isNaN(parsedF) && parsedF > 0) factor = parsedF;
+      } else if (r.length > 23) {
         const parsedF = Number(r[23]);
         if (!isNaN(parsedF) && parsedF > 0) factor = parsedF;
       }
-      factor = factor || 1;
+      if (!factor) {
+        factor = resFactorMap.get(code) || 1;
+      }
 
       // Disponível Promax / Coluna L (índice 11) ou Coluna 27 (Qtd Estoque em unidades)
       let colLVal = 0;
@@ -470,6 +532,7 @@ export function process020502(
       fileProductsMap[code] = {
         estoque: colLVal, // Disponível Promax
         contagem: colMVal, // Contagem física
+        fator: factor, // Fator oficial de embalagem (cx/unid)
         desc,
         tipo,
         rawRow: r,
@@ -477,71 +540,35 @@ export function process020502(
     }
   });
 
-  // Mapeia ajustes pendentes para garantir que J = G e a conciliação atual permaneça 100% zerada
-  const sAdj: { M: Record<number, number>; N: Record<number, number>; O: Record<number, number> } = {
-    M: {},
-    N: {},
-    O: {},
-  };
-  (currentData.aj?.so || []).forEach((r) => {
-    if (r[8] === 'Pendente') {
-      const code = Number(r[0]);
-      sAdj.M[code] = (sAdj.M[code] || 0) + Number(r[2] || 0);
-    }
-  });
-  (currentData.aj?.av || []).forEach((r) => {
-    if (r[4] === 'Pendente') {
-      const code = Number(r[1]);
-      sAdj.N[code] = (sAdj.N[code] || 0) + Number(r[3] || 0);
-    }
-  });
-  (currentData.aj?.fm || []).forEach((r) => {
-    const code = Number(r[0]);
-    sAdj.O[code] = (sAdj.O[code] || 0) + Number(r[2] || 0);
-  });
-
   let ach = 0;
   let aus = 0;
 
-  // Mapa com a última diferença apurada/congelada do produto em caixas (DIF 1 / data.dia)
-  const existingDiaMap = new Map<number, number>();
-  (currentData.dia || []).forEach((d) => existingDiaMap.set(d[0], d[1]));
-
-  // 1. Atualiza os produtos já existentes no RESUMO com o Disponível Promax da 02.05.02
-  // e calcula o Inventário Físico (b) para refletir as divergências reais no Dashboard
+  // 1. Atualiza os produtos já existentes no RESUMO com o Disponível Promax (G), Fator (V0) e Inventário (b) da 02.05.02
+  // Quando o Inventário na 02.05.02 estiver zerado (0/00), b = 0:
+  // - Itens com saldo Promax positivo (G > 0) aparecem como FALTA no ranking
+  // - Itens com saldo Promax negativo (G < 0) ou ajustes positivos pendentes (J > G) aparecem como SOBRA no ranking
   const nextRes: ResRow[] = currentData.res.map((x) => {
     const rowCopy = [...x] as ResRow;
     const code = rowCopy[0];
     const fileItem = fileProductsMap[code];
-    const V = rowCopy[4] || 1;
-    const M = sAdj.M[code] || 0;
-    const Nn = sAdj.N[code] || 0;
-    const Oo = sAdj.O[code] || 0;
-    const diffCx = existingDiaMap.get(code) ?? 0;
+
+    // Preço sempre protegido pelo preço fixado no código (ou override de importação de preços)
+    rowCopy[5] = getEffectiveProductPrice(code, rowCopy[5], currentData.priceOverrides);
 
     if (fileItem) {
       ach++;
-      rowCopy[3] = fileItem.estoque;   // Disponível Promax -> G no Resumo
-
-      // Lê a contagem física se o arquivo contiver contagens; caso contrário preserva contagem existente
-      const hasAnyCountInFile = Object.values(fileProductsMap).some((p) => p.contagem > 0);
-      if (hasAnyCountInFile) {
-        rowCopy[7] = fileItem.contagem;
-      } else if (rowCopy[7] === 0 || rowCopy[7] === undefined) {
-        // Se o arquivo só continha estoque e não tinha contagem, inicializa alinhado ao estoque
-        rowCopy[7] = fileItem.estoque;
-      }
-      rowCopy[8] = 0;                  // P (repack) zerado
+      rowCopy[3] = fileItem.estoque;  // Disponível Promax -> G no Resumo
+      rowCopy[4] = fileItem.fator;    // Fator de embalagem oficial -> V0 no Resumo
+      rowCopy[7] = fileItem.contagem; // Inventário Físico do arquivo -> b no Resumo
+      rowCopy[8] = 0;                 // P (repack) zerado
       rowCopy[9] = 0;
       rowCopy[10] = 0;
       rowCopy[11] = 0;
     } else {
       aus++;
-      // Produtos que não constam no arquivo: se já tinham estoque zerado, mantém zerado; não zera se for item com histórico
-      if (rowCopy[3] === 0 && rowCopy[7] === 0) {
-        rowCopy[3] = 0;
-        rowCopy[7] = 0;
-      }
+      // Produto ausente na 02.05.02 atual: zera Disponível Promax e contagem antiga de dias anteriores
+      rowCopy[3] = 0;
+      rowCopy[7] = 0;
       rowCopy[8] = 0;
       rowCopy[9] = 0;
       rowCopy[10] = 0;
@@ -557,7 +584,7 @@ export function process020502(
   Object.entries(fileProductsMap).forEach(([codeStr, item]) => {
     const code = Number(codeStr);
     if (!existingCodesSet.has(code)) {
-      const V = item.rawRow && item.rawRow.length > 23 ? Number(item.rawRow[23]) || 1 : 1;
+      const V = item.fator || 1;
       const contagemVal = item.contagem;
 
       const novaLinha: ResRow = [
@@ -566,7 +593,7 @@ export function process020502(
         item.tipo || 'cx',
         item.estoque,                          // 3: G - Disponível Promax
         V,                                     // 4: V0 (fator)
-        0,                                     // 5: U (preço padrão 0)
+        getEffectiveProductPrice(code, 0, currentData.priceOverrides), // 5: U (preço fixado no código ou importado)
         0,                                     // 6: X (fator hecto)
         contagemVal,                           // 7: b (contagem física)
         0,                                     // 8: P (repack)
@@ -588,15 +615,15 @@ export function process020502(
 
   const nextGradeRes: ResRow[] = nextRes.map((r) => [...r] as ResRow);
 
-  // Garante que a DIF 1 (eq) permaneça com a última diferença salva e congelada e o DIA ATUAL (gq) fique zerado
-  const nextDia: DiaRow[] = nextRes.map((r) => {
-    const code = r[0];
-    const prevEq = existingDiaMap.get(code) ?? 0;
-    return [code, prevEq, 0] as DiaRow;
-  });
-
   const isGradeOnly = targetTab === 'grade';
 
+  const nextEc = {
+    h: header.length > 0 ? header : (currentData.ec?.h || []),
+    r: body,
+  };
+
+  // IMPORTANTE: A importação da 02.05.02 NÃO altera DIF Diária (dia) nem DIF Mensal (men).
+  // Elas só são atualizadas quando o usuário finaliza a conciliação clicando em CONGELAR.
   const nextData: RawData = isGradeOnly
     ? {
         ...currentData,
@@ -605,14 +632,13 @@ export function process020502(
     : {
         ...currentData,
         res: nextRes,
-        dia: nextDia,
+        dia: currentData.dia,
+        men: currentData.men,
         gradeEc: updatedGradeEc,
         gradeRes: nextGradeRes,
         ec0304: currentData.ec0304,
-        ec: {
-          h: header.length > 0 ? header : (currentData.ec?.h || []),
-          r: body,
-        },
+        ec: nextEc,
+        ecSyncHash: computeEcContentHash(nextEc),
         desativados: currentData.desativados || [],
       };
 
@@ -627,8 +653,9 @@ export function process020502(
       `• <b>Demais abas protegidas:</b> Dashboard, Resumo e Estoque Central permanecem com suas contagens e divergências intactas.`
     : `<b>Importação 02.05.02 Concluída via Estoque Central: ${nome}</b> — ${body.length} produtos carregados.<br>` +
       `• <b>Aba ESTOQUE CENTRAL</b> atualizada primeiro com todas as ${body.length} linhas brutas do relatório oficial.<br>` +
-      `• <b>Plataforma Inteira Recalculada:</b> RESUMO, GRADE e DASHBOARD atualizados com os novos saldos (${ach} produtos sincronizados` +
+      `• <b>Conciliação Atualizada:</b> RESUMO, GRADE e DASHBOARD atualizados (${ach} produtos sincronizados` +
       (novosAdicionados > 0 ? ` e ${novosAdicionados} novos produtos adicionados).<br>` : ').<br>') +
+      `• <b>DIF Diária e DIF Mensal protegidas:</b> Só serão atualizadas quando você finalizar a conciliação clicando em <b>CONGELAR</b>.<br>` +
       `• TOTAL FALTAS: ${dDiff(antes.tf, dep.tf)} &nbsp; | &nbsp; TOTAL SOBRAS: ${dDiff(
         antes.ts,
         dep.ts
@@ -649,4 +676,90 @@ export function process020502(
     bannerHtml,
     nextData,
   };
+}
+
+/**
+ * Sincroniza diretamente a tabela atual do Estoque Central (data.ec) com o Dashboard e Resumo.
+ * Garante que Disponível (G), Fator (V0) e Inventário (b) venham sempre da 02.05.02 importada no Estoque Central.
+ */
+export function syncEcWithDashboard(currentData: RawData): Import020502Result {
+  if (!currentData.ec || !currentData.ec.r || currentData.ec.r.length === 0) {
+    return {
+      success: false,
+      message: 'Nenhum dado encontrado no Estoque Central para sincronizar.',
+    };
+  }
+  return process020502Rows(
+    currentData.ec.r,
+    'Estoque Central Sincronizado',
+    currentData,
+    'ec',
+    currentData.ec.h || []
+  );
+}
+
+/**
+ * Verifica se o Resumo/Dashboard está dessincronizado em relação à 02.05.02 carregada no Estoque Central.
+ * Se o hash de sincronização (ecSyncHash) já corresponde ao EC atual, preserva edições intencionais
+ * posteriores (Recontagem, LIMPAR DIF, Contagem Estoque, Resumo, Tabela 7).
+ */
+export function isResOutOfSyncWithEc(currentData: RawData): boolean {
+  if (!currentData.ec || !currentData.ec.r || currentData.ec.r.length < 20) {
+    return false;
+  }
+  const currentEcHash = computeEcContentHash(currentData.ec);
+  if (currentData.ecSyncHash && currentData.ecSyncHash === currentEcHash) {
+    return false;
+  }
+  const h = currentData.ec.h || [];
+  const ip = h.indexOf('Produto') >= 0 ? h.indexOf('Produto') : 3;
+  const ifator = h.indexOf('Fator') >= 0 ? h.indexOf('Fator') : 23;
+
+  const resMap = new Map<number, ResRow>();
+  (currentData.res || []).forEach((r) => resMap.set(r[0], r));
+
+  const ecCodes = new Set<number>();
+
+  for (const r of currentData.ec.r) {
+    const code = Number(String(r[ip] || '').trim().replace(/^0+/, ''));
+    if (isNaN(code) || code <= 0) continue;
+    ecCodes.add(code);
+
+    const resRow = resMap.get(code);
+    if (!resRow) return true;
+
+    const ecFator = ifator >= 0 && r.length > ifator ? Number(r[ifator]) : 0;
+    const factor = !isNaN(ecFator) && ecFator > 0 ? ecFator : (resRow[4] || 1);
+    if (!isNaN(ecFator) && ecFator > 0 && resRow[4] !== ecFator) {
+      return true;
+    }
+
+    let dispUnits = 0;
+    if (r.length > 27 && r[27] !== undefined && r[27] !== '') {
+      const p27 = parseNumber(r[27]);
+      dispUnits = p27 !== 0 ? p27 : parsePromaxToUnits(r[11], factor);
+    } else {
+      dispUnits = parsePromaxToUnits(r[11], factor);
+    }
+
+    let invUnits = 0;
+    if (r.length > 28 && r[28] !== undefined && r[28] !== '') {
+      const p28 = parseNumber(r[28]);
+      invUnits = p28 !== 0 ? p28 : parsePromaxToUnits(r[12], factor);
+    } else {
+      invUnits = parsePromaxToUnits(r[12], factor);
+    }
+
+    if (resRow[3] !== dispUnits || resRow[7] !== invUnits) {
+      return true;
+    }
+  }
+
+  for (const r of currentData.res || []) {
+    if (!ecCodes.has(r[0]) && (r[3] !== 0 || r[7] !== 0)) {
+      return true;
+    }
+  }
+
+  return false;
 }

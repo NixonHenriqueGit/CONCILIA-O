@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { CalculatedProduct } from '../data/types';
 import { N, Z, Rt } from '../utils/formatters';
 import { sum } from '../utils/calc';
+import { readFileToText } from '../utils/importer020502';
 
 interface ResumoViewProps {
   calculated: CalculatedProduct[];
@@ -32,25 +33,30 @@ export const ResumoView: React.FC<ResumoViewProps> = ({
   const [query, setQuery] = useState('');
   const [activeEditCell, setActiveEditCell] = useState<{ index: number; key: 'G' | 'J' } | null>(null);
 
-  const handleFileT7Change = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileT7Change = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      let text = '';
-      try {
-        text = new TextDecoder('utf-8', { fatal: true }).decode(
-          reader.result as ArrayBuffer
-        );
-      } catch {
-        text = new TextDecoder('windows-1252').decode(
-          reader.result as ArrayBuffer
-        );
-      }
-      onImportT7(text, file.name);
-    };
-    reader.readAsArrayBuffer(file);
+    try {
+      const { text, fileName } = await readFileToText(file);
+      onImportT7(text, fileName);
+    } catch {
+      const reader = new FileReader();
+      reader.onload = () => {
+        let text = '';
+        try {
+          text = new TextDecoder('utf-8', { fatal: true }).decode(
+            reader.result as ArrayBuffer
+          );
+        } catch {
+          text = new TextDecoder('windows-1252').decode(
+            reader.result as ArrayBuffer
+          );
+        }
+        onImportT7(text, file.name);
+      };
+      reader.readAsArrayBuffer(file);
+    }
     e.target.value = '';
   };
 
@@ -617,13 +623,13 @@ export const ResumoView: React.FC<ResumoViewProps> = ({
                         key={`g-${r.c}-${r.G}`}
                         onBlur={(e) => {
                           const val = Number(e.target.value.replace(',', '.')) || 0;
-                          if (val !== r.G) onUpdateRes(r.originalIndex, 'G', val);
+                          if (val !== r.G) onUpdateRes(r.c, 'G', val);
                           setActiveEditCell(null);
                         }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
                             const val = Number((e.target as HTMLInputElement).value.replace(',', '.')) || 0;
-                            if (val !== r.G) onUpdateRes(r.originalIndex, 'G', val);
+                            if (val !== r.G) onUpdateRes(r.c, 'G', val);
                             setActiveEditCell(null);
                           }
                           if (e.key === 'Escape') {
@@ -650,13 +656,13 @@ export const ResumoView: React.FC<ResumoViewProps> = ({
                         key={`j-${r.c}-${r.J}`}
                         onBlur={(e) => {
                           const val = Number(e.target.value.replace(',', '.')) || 0;
-                          if (val !== r.J) onUpdateRes(r.originalIndex, 'J', val);
+                          if (val !== r.J) onUpdateRes(r.c, 'J', val);
                           setActiveEditCell(null);
                         }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
                             const val = Number((e.target as HTMLInputElement).value.replace(',', '.')) || 0;
-                            if (val !== r.J) onUpdateRes(r.originalIndex, 'J', val);
+                            if (val !== r.J) onUpdateRes(r.c, 'J', val);
                             setActiveEditCell(null);
                           }
                           if (e.key === 'Escape') {

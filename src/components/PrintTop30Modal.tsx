@@ -41,6 +41,7 @@ export const PrintTop30Modal: React.FC<PrintTop30ModalProps> = ({
 }) => {
   const reportRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   if (!isOpen) return null;
@@ -55,6 +56,7 @@ export const PrintTop30Modal: React.FC<PrintTop30ModalProps> = ({
 
   const handleExportJpg = async () => {
     if (!reportRef.current) return;
+    setExportError(null);
     setIsExporting(true);
     try {
       const dataUrl = await toJpeg(reportRef.current, {
@@ -68,7 +70,7 @@ export const PrintTop30Modal: React.FC<PrintTop30ModalProps> = ({
       link.click();
     } catch (err) {
       console.error('Erro ao gerar print JPG:', err);
-      alert('Erro ao gerar imagem JPG. Tente novamente.');
+      setExportError('Erro ao gerar imagem JPG. Tente novamente.');
     } finally {
       setIsExporting(false);
     }
@@ -182,6 +184,19 @@ export const PrintTop30Modal: React.FC<PrintTop30ModalProps> = ({
             </button>
           </div>
         </div>
+
+        {exportError && (
+          <div className="mx-4 mt-3 px-3 py-2 bg-rose-50 border border-rose-300 text-rose-800 rounded-md text-xs font-bold flex items-center justify-between print:hidden">
+            <span>⚠️ {exportError}</span>
+            <button
+              type="button"
+              onClick={() => setExportError(null)}
+              className="text-rose-700 hover:text-rose-950 font-black px-1.5"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {/* ÁREA CAPTURADA PARA O PRINT JPG (100% IDÊNTICA AO PRINT OFICIAL) */}
         <div className="p-4 overflow-auto flex-1 bg-[#F1F5F9] flex justify-center">

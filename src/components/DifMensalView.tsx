@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { MenRow } from '../data/types';
+import { MenRow, SavedDailyDiffRecord } from '../data/types';
 import { N } from '../utils/formatters';
 import { 
   Search, 
@@ -12,7 +12,9 @@ import {
   X,
   Edit3,
   HelpCircle,
-  Save
+  Save,
+  Eye,
+  Database
 } from 'lucide-react';
 
 
@@ -23,6 +25,8 @@ export interface DifMensalViewProps {
   onResetAll?: (options?: { resetFechamentoMode?: 'keep' | 'last_day' | 'zero' }) => void;
   onUpdateMen?: (newMen: MenRow[], desc: string) => void;
   onSalvarDifToday?: () => void;
+  savedDailyDiffs?: Record<string, SavedDailyDiffRecord>;
+  onDeleteDailyDiff?: (dateKey: string) => void;
 }
 
 export const DifMensalView: React.FC<DifMensalViewProps> = ({ 
@@ -32,6 +36,8 @@ export const DifMensalView: React.FC<DifMensalViewProps> = ({
   onResetAll, 
   onUpdateMen,
   onSalvarDifToday,
+  savedDailyDiffs = {},
+  onDeleteDailyDiff,
 }) => {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'nonzero' | 'below' | 'above'>('all');
@@ -92,6 +98,18 @@ export const DifMensalView: React.FC<DifMensalViewProps> = ({
     text: string;
     type: 'success' | 'warn';
   } | null>(null);
+
+  // Estados para inspeção e exclusão de abas isoladas no Firebase (1 dia = 1 documento)
+  const [inspectingDateKey, setInspectingDateKey] = useState<string | null>(null);
+  const [inspectQuery, setInspectQuery] = useState('');
+  const [deletingDateKey, setDeletingDateKey] = useState<string | null>(null);
+
+  const sortedSavedDiffs = useMemo(() => {
+    return (Object.values(savedDailyDiffs) as SavedDailyDiffRecord[])
+      .sort((a, b) => b.dateKey.localeCompare(a.dateKey));
+  }, [savedDailyDiffs]);
+
+  const inspectingRecord = inspectingDateKey ? savedDailyDiffs[inspectingDateKey] || null : null;
 
   // Auto-dismiss da notificação
   useEffect(() => {
@@ -584,7 +602,7 @@ export const DifMensalView: React.FC<DifMensalViewProps> = ({
           }}
           title="Focar apenas nos dias 14, 15 e 19"
         >
-          <span>{showOnly141519 ? '⭐ Foco: 14, 15, 19' : '📅 Todos os 31 Dias'}</span>
+          <span>{showOnly141519 ? '⭐ Foco: 14, 15, 19 (Ver 31)' : '⭐ Focar Dias 14, 15, 19'}</span>
         </button>
 
         <button
@@ -613,7 +631,7 @@ export const DifMensalView: React.FC<DifMensalViewProps> = ({
               : 'Clique para focar apenas nos dias com lançamentos (Dia 1, 2, 3...) de forma compacta.'
           }
         >
-          <span>{onlyActiveDays ? '🔍 Foco: Dias com Dados' : '📅 Todos os 31 Dias'}</span>
+          <span>{onlyActiveDays ? '🔍 Foco: Dias com Dados (Ver 31)' : '🔍 Focar Dias com Dados'}</span>
         </button>
 
         {/* Legenda de Cores Compacta */}
@@ -631,6 +649,173 @@ export const DifMensalView: React.FC<DifMensalViewProps> = ({
             Igual
           </span>
         </div>
+      </div>
+
+      {/* PAINEL DE ABAS ISOLADAS POR DATA NO FIREBASE (1 DIA = 1 DOCUMENTO) */}
+      <div
+        style={{
+          margin: '0 24px 12px 24px',
+          background: '#F8FAFC',
+          border: '1.5px solid #CBD5E1',
+          borderLeft: '4px solid #1E3A8A',
+          borderRadius: '8px',
+          padding: '12px 16px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', marginBottom: sortedSavedDiffs.length > 0 ? '10px' : '0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Database size={16} color="#1E3A8A" />
+            <div>
+              <h3 style={{ margin: 0, fontSize: '13px', fontWeight: 'bold', color: '#0F172A' }}>
+                ABAS ISOLADAS NO FIREBASE — 1 DIA = 1 DOCUMENTO ({sortedSavedDiffs.length})
+              </h3>
+              <div style={{ fontSize: '11px', color: '#475569' }}>
+                Cada conciliação salva ou congelada cria sua própria aba exclusiva em <code>diferencas_diarias_salvas/AAAA-MM-DD</code>, sem nunca mesclar com outros dias.
+              </div>
+            </div>
+          </div>
+          {onSalvarDifToday && (
+            <button
+              type="button"
+              onClick={onSalvarDifToday}
+              style={{
+                background: '#1E3A8A',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '5px',
+                padding: '6px 12px',
+                fontSize: '11.5px',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+              }}
+            >
+              <Save size={13} />
+              <span>Criar / Atualizar Aba de Hoje</span>
+            </button>
+          )}
+        </div>
+
+        {sortedSavedDiffs.length === 0 ? (
+          <div style={{ fontSize: '11.5px', color: '#64748B', marginTop: '6px', fontStyle: 'italic' }}>
+            Nenhuma aba diária isolada gravada ainda. Ao clicar em CONGELAR ou SALVAR DIF, o dia selecionado será gravado em sua própria aba no Firebase.
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '10px' }}>
+            {sortedSavedDiffs.map((rec) => {
+              const saldo = rec.summary.saldoFinal;
+              return (
+                <div
+                  key={rec.dateKey}
+                  style={{
+                    background: '#fff',
+                    border: '1px solid #CBD5E1',
+                    borderRadius: '6px',
+                    padding: '10px 12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                    <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#1E3A8A', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                      <Calendar size={13} />
+                      {rec.dateBR}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: '9.5px',
+                        fontWeight: 'bold',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        background: rec.sourceAction === 'CONGELAR' ? '#FEF3C7' : rec.sourceAction === 'OFICIAL' ? '#DCFCE7' : '#DBEAFE',
+                        color: rec.sourceAction === 'CONGELAR' ? '#92400E' : rec.sourceAction === 'OFICIAL' ? '#166534' : '#1E40AF',
+                      }}
+                    >
+                      {rec.sourceAction} • {rec.savedAt}
+                    </span>
+                  </div>
+
+                  <div style={{ fontSize: '10px', fontFamily: 'monospace', color: '#64748B', background: '#F1F5F9', padding: '2px 6px', borderRadius: '3px' }}>
+                    diferencas_diarias_salvas/{rec.dateKey}
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '4px', fontSize: '10.5px', textAlign: 'center', marginTop: '2px' }}>
+                    <div style={{ background: '#FFF5F5', padding: '4px', borderRadius: '4px' }}>
+                      <div style={{ color: '#9B2C2C', fontSize: '9px', fontWeight: 'bold' }}>FALTAS</div>
+                      <div style={{ color: '#C53030', fontWeight: 'bold' }}>R$ {N(Math.round(rec.summary.totalFaltas))}</div>
+                    </div>
+                    <div style={{ background: '#F0FFF4', padding: '4px', borderRadius: '4px' }}>
+                      <div style={{ color: '#22543D', fontSize: '9px', fontWeight: 'bold' }}>SOBRAS</div>
+                      <div style={{ color: '#276749', fontWeight: 'bold' }}>R$ {N(Math.round(rec.summary.totalSobras))}</div>
+                    </div>
+                    <div style={{ background: saldo < 0 ? '#FFF5F5' : '#F0F9FF', padding: '4px', borderRadius: '4px' }}>
+                      <div style={{ color: '#334155', fontSize: '9px', fontWeight: 'bold' }}>SALDO</div>
+                      <div style={{ color: saldo < 0 ? '#C53030' : '#1D4ED8', fontWeight: 'bold' }}>
+                        {saldo < 0 ? '-' : ''}R$ {N(Math.round(Math.abs(saldo)))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '4px', gap: '6px' }}>
+                    <span style={{ fontSize: '10.5px', color: '#64748B' }}>
+                      <b>{rec.summary.divergenciasCount}</b> divergências
+                    </span>
+                    <div style={{ display: 'flex', gap: '5px' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setInspectQuery('');
+                          setInspectingDateKey(rec.dateKey);
+                        }}
+                        style={{
+                          background: '#2B579A',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: '4px',
+                          padding: '4px 8px',
+                          fontSize: '11px',
+                          fontWeight: 'bold',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                        }}
+                      >
+                        <Eye size={12} />
+                        <span>Abrir Aba</span>
+                      </button>
+                      {onDeleteDailyDiff && (
+                        <button
+                          type="button"
+                          onClick={() => setDeletingDateKey(rec.dateKey)}
+                          style={{
+                            background: '#FEE2E2',
+                            color: '#B91C1C',
+                            border: '1px solid #FCA5A5',
+                            borderRadius: '4px',
+                            padding: '4px 7px',
+                            fontSize: '11px',
+                            fontWeight: 'bold',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                          }}
+                          title={`Excluir apenas a aba de ${rec.dateBR}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* PAINEL DE ANÁLISE DAS DIFERENÇAS DOS DIAS (QUANDO HOUVER PESQUISA ATIVA) */}
@@ -1679,6 +1864,139 @@ export const DifMensalView: React.FC<DifMensalViewProps> = ({
                   Salvar
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* MODAL 4: VISUALIZAR ABA ISOLADA DE UM DIA NO FIREBASE         */}
+      {/* ============================================================ */}
+      {inspectingRecord && (
+        <div className="modal-overlay" onClick={() => setInspectingDateKey(null)}>
+          <div
+            className="modal-card"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: '820px', width: '95%', maxHeight: '88vh', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}
+          >
+            <div style={{ background: '#1E3A8A', color: '#fff', padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontSize: '15px', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Calendar size={17} />
+                  <span>ABA ISOLADA DO DIA {inspectingRecord.dateBR}</span>
+                </div>
+                <div style={{ fontSize: '11px', color: '#BFDBFE', marginTop: '2px' }}>
+                  Firebase: <code>diferencas_diarias_salvas/{inspectingRecord.dateKey}</code> • Origem: {inspectingRecord.sourceAction} ({inspectingRecord.savedAt})
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setInspectingDateKey(null)}
+                style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '18px' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div style={{ padding: '14px 18px', borderBottom: '1px solid #E2E8F0', background: '#F8FAFC', display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', fontSize: '12px' }}>
+                <span style={{ background: '#FEE2E2', color: '#991B1B', padding: '4px 10px', borderRadius: '5px', fontWeight: 'bold' }}>
+                  Faltas: R$ {N(Math.round(inspectingRecord.summary.totalFaltas))} ({inspectingRecord.summary.faltasCount})
+                </span>
+                <span style={{ background: '#DCFCE7', color: '#166534', padding: '4px 10px', borderRadius: '5px', fontWeight: 'bold' }}>
+                  Sobras: R$ {N(Math.round(inspectingRecord.summary.totalSobras))} ({inspectingRecord.summary.sobrasCount})
+                </span>
+                <span style={{ background: '#E0F2FE', color: '#075985', padding: '4px 10px', borderRadius: '5px', fontWeight: 'bold' }}>
+                  Saldo: {inspectingRecord.summary.saldoFinal < 0 ? '-' : ''}R$ {N(Math.round(Math.abs(inspectingRecord.summary.saldoFinal)))}
+                </span>
+              </div>
+              <input
+                type="text"
+                value={inspectQuery}
+                onChange={(e) => setInspectQuery(e.target.value)}
+                placeholder="Filtrar código ou produto..."
+                style={{ padding: '6px 10px', fontSize: '12px', border: '1px solid #CBD5E1', borderRadius: '4px', minWidth: '210px' }}
+              />
+            </div>
+
+            <div style={{ overflowY: 'auto', flex: 1, padding: '12px 18px' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                <thead>
+                  <tr style={{ background: '#F1F5F9', borderBottom: '2px solid #CBD5E1' }}>
+                    <th style={{ padding: '6px 8px', textAlign: 'center', width: '70px' }}>CÓD</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'left' }}>DESCRIÇÃO</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'center', width: '85px' }}>DIF CX</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', width: '110px' }}>VALOR R$</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {inspectingRecord.items
+                    .filter((it) => {
+                      if (it.difCx === 0 && !inspectQuery.trim()) return false;
+                      const q = inspectQuery.trim().toLowerCase();
+                      if (!q) return true;
+                      return `${it.cod} ${it.desc}`.toLowerCase().includes(q);
+                    })
+                    .sort((a, b) => Math.abs(b.difValor) - Math.abs(a.difValor))
+                    .map((it) => (
+                      <tr key={it.cod} style={{ borderBottom: '1px solid #E2E8F0' }}>
+                        <td style={{ padding: '5px 8px', textAlign: 'center', fontFamily: 'monospace', fontWeight: 'bold' }}>{it.cod}</td>
+                        <td style={{ padding: '5px 8px' }}>{it.desc}</td>
+                        <td
+                          style={{
+                            padding: '5px 8px',
+                            textAlign: 'center',
+                            fontWeight: 'bold',
+                            background: it.difCx < 0 ? '#FEE2E2' : it.difCx > 0 ? '#FEF3C7' : '#F8FAFC',
+                            color: it.difCx < 0 ? '#991B1B' : it.difCx > 0 ? '#92400E' : '#475569',
+                          }}
+                        >
+                          {it.difCx > 0 ? `+${it.difCx}` : it.difCx} cx
+                        </td>
+                        <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 'bold', color: it.difValor < 0 ? '#C00000' : it.difValor > 0 ? '#166534' : '#475569' }}>
+                          {it.difValor < 0 ? '-' : ''}R$ {N(Math.round(Math.abs(it.difValor)))}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* MODAL 5: CONFIRMAR EXCLUSÃO DE ABA ISOLADA                   */}
+      {/* ============================================================ */}
+      {deletingDateKey && (
+        <div className="modal-overlay" onClick={() => setDeletingDateKey(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '430px', width: '92%' }}>
+            <div style={{ background: '#B91C1C', margin: '-20px -20px 14px -20px', padding: '12px 16px', color: '#fff', fontWeight: 'bold', fontSize: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>Excluir Aba Isolada do Firebase</span>
+              <button onClick={() => setDeletingDateKey(null)} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer' }}>✕</button>
+            </div>
+            <p style={{ fontSize: '13px', color: '#334155', margin: '0 0 16px', lineHeight: 1.45 }}>
+              Deseja excluir apenas a aba do dia <b>{deletingDateKey.split('-').reverse().join('/')}</b> (<code>diferencas_diarias_salvas/{deletingDateKey}</code>)? Os outros dias salvos permanecerão intactos.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => setDeletingDateKey(null)}
+                style={{ background: '#eee', border: '1px solid #ccc', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' }}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const keyToDelete = deletingDateKey;
+                  setDeletingDateKey(null);
+                  onDeleteDailyDiff?.(keyToDelete);
+                }}
+                style={{ background: '#B91C1C', color: '#fff', border: 'none', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' }}
+              >
+                Confirmar Exclusão
+              </button>
             </div>
           </div>
         </div>

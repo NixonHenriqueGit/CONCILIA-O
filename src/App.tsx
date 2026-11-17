@@ -4,9 +4,9 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { RawData, ResRow, AjustesData, MenRow, DiaRow, DashboardSnapshot, EstoqueCentralData, SavedPopupItem } from './data/types';
+import { RawData, ResRow, AjustesData, MenRow, DiaRow, DashboardSnapshot, EstoqueCentralData, SavedPopupItem, SavedDailyDiffRecord, SavedDailyDiffItem, CalculatedProduct } from './data/types';
 import { initialRawData, cervegelasRes, cervegelasMen } from './data/defaultRawData';
-import { calculateProducts, CERVEGELA_CODES } from './utils/calc';
+import { calculateProducts, CERVEGELA_CODES, sum } from './utils/calc';
 import {
   saveStateToFirestore,
   loadStateFromFirestore,
@@ -14,8 +14,13 @@ import {
   subscribeToState,
   savePopupsToFirestore,
   loadPopupsFromFirestore,
+  saveDailyDiffToFirestore,
+  loadAllDailyDiffsFromFirestore,
+  deleteDailyDiffFromFirestore,
+  subscribeToDailyDiffs,
+  computeEcContentHash,
 } from './firebase';
-import { process020502, parseColL } from './utils/importer020502';
+import { process020502, parseColL, syncEcWithDashboard, isResOutOfSyncWithEc, splitDelimitedLine } from './utils/importer020502';
 import { process020304 } from './utils/importer020304';
 import { processTabelaPrecos } from './utils/importerPrecos';
 // Snapshot storage removed
@@ -58,33 +63,38 @@ export default function App() {
   // Pop-ups Salvos para Auditoria persistidos exclusivamente no Firestore
   const [savedPopups, setSavedPopups] = useState<SavedPopupItem[]>([]);
 
-  useEffect(() => {
-    if (savedPopups.length > 0) {
-      savePopupsToFirestore(savedPopups);
-    }
-  }, [savedPopups]);
+  // Diferenças Diárias Salvas em abas 100% isoladas por data no Firebase (diferencas_diarias_salvas/{YYYY-MM-DD})
+  const [savedDailyDiffs, setSavedDailyDiffs] = useState<Record<string, SavedDailyDiffRecord>>({});
 
   const handleSavePopup = (item: SavedPopupItem) => {
     setSavedPopups((prev) => {
       const existingIndex = prev.findIndex((p) => p.code === item.code && p.isFalta === item.isFalta);
+      let next: SavedPopupItem[];
       if (existingIndex >= 0) {
-        const updated = [...prev];
-        updated[existingIndex] = item;
+        next = [...prev];
+        next[existingIndex] = item;
         setToastMessage(`✓ Pop-up de [${item.code}] ${item.desc} atualizado na aba POP-UPS SALVOS!`);
-        return updated;
+      } else {
+        next = [item, ...prev];
+        setToastMessage(`✓ Pop-up de [${item.code}] ${item.desc} salvo na aba POP-UPS SALVOS!`);
       }
-      setToastMessage(`✓ Pop-up de [${item.code}] ${item.desc} salvo na aba POP-UPS SALVOS!`);
-      return [item, ...prev];
+      savePopupsToFirestore(next);
+      return next;
     });
   };
 
   const handleRemoveSavedPopup = (id: string) => {
-    setSavedPopups((prev) => prev.filter((p) => p.id !== id));
+    setSavedPopups((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      savePopupsToFirestore(next);
+      return next;
+    });
     setToastMessage(`Item removido dos Pop-ups Salvos.`);
   };
 
   const handleClearSavedPopups = () => {
     setSavedPopups([]);
+    savePopupsToFirestore([]);
     setToastMessage(`Todos os Pop-ups Salvos foram limpos.`);
   };
 
@@ -96,6 +106,7 @@ export default function App() {
   const [isSalvarDifModalOpen, setIsSalvarDifModalOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [protectedAction, setProtectedAction] = useState<(() => void) | null>(null);
+  const [produtosInitialQuery, setProdutosInitialQuery] = useState('');
 
   const runProtectedAction = (action: () => void) => {
     setProtectedAction(() => action);
@@ -125,16 +136,28 @@ export default function App() {
     let isMounted = true;
 
     async function initFirestore() {
-      const [remote, popups] = await Promise.all([
+      const [remote, popups, dailyDiffs] = await Promise.all([
         loadStateFromFirestore(),
         loadPopupsFromFirestore(),
+        loadAllDailyDiffsFromFirestore(),
       ]);
       if (remote && isMounted) {
-        setData(remote);
+        let syncedRemote = remote;
+        if (isResOutOfSyncWithEc(remote)) {
+          const syncRes = syncEcWithDashboard(remote);
+          if (syncRes.success && syncRes.nextData) {
+            syncedRemote = syncRes.nextData;
+            saveStateToFirestore(syncedRemote, 'Auto-sincronização com Estoque Central (02.05.02)');
+          }
+        }
+        setData(syncedRemote);
         setIsRealtimeActive(true);
       }
-      if (popups && popups.length > 0 && isMounted) {
+      if (Array.isArray(popups) && isMounted) {
         setSavedPopups(popups);
+      }
+      if (dailyDiffs && isMounted) {
+        setSavedDailyDiffs(dailyDiffs);
       }
     }
     initFirestore();
@@ -142,7 +165,14 @@ export default function App() {
     const unsubscribe = subscribeToState(
       (remoteData, action) => {
         if (!isMounted) return;
-        setData(remoteData);
+        let syncedRemote = remoteData;
+        if (isResOutOfSyncWithEc(remoteData)) {
+          const syncRes = syncEcWithDashboard(remoteData);
+          if (syncRes.success && syncRes.nextData) {
+            syncedRemote = syncRes.nextData;
+          }
+        }
+        setData(syncedRemote);
         setIsRealtimeActive(true);
         if (action) {
           setToastMessage(`⚡ Sincronizado em tempo real: ${action}`);
@@ -161,21 +191,31 @@ export default function App() {
       }
     );
 
+    const unsubscribeDailyDiffs = subscribeToDailyDiffs((records) => {
+      if (!isMounted) return;
+      setSavedDailyDiffs(records);
+    });
+
     return () => {
       isMounted = false;
       unsubscribe();
+      unsubscribeDailyDiffs();
     };
   }, []);
 
-  // Push para histórico
-  const pushHistory = (newData: RawData, description: string) => {
-    const trimmed = history.slice(0, historyIndex + 1);
-    setHistory([...trimmed, { data: newData, desc: description }]);
-    setHistoryIndex(trimmed.length);
+  // Push para histórico (separa o estado anterior como ponto 0 para permitir desfazer já na 1ª alteração)
+  const pushHistory = (newData: RawData, description: string, baseData: RawData = data) => {
+    const baseHistory =
+      history.length === 0 || historyIndex < 0
+        ? [{ data: baseData, desc: 'Estado Inicial' }]
+        : history.slice(0, historyIndex + 1);
+    const nextHistory = [...baseHistory, { data: newData, desc: description }].slice(-25);
+    setHistory(nextHistory);
+    setHistoryIndex(nextHistory.length - 1);
   };
 
   const updateDataWithHistory = (newData: RawData, description: string) => {
-    pushHistory(newData, description);
+    pushHistory(newData, description, data);
     setData(newData);
     saveStateToFirestore(newData, description);
   };
@@ -194,8 +234,11 @@ export default function App() {
     return calculateProducts(gradeData);
   }, [data.gradeRes, data.res, data.aj, data.xs, data.dia, data.men]);
 
-  // Atualização de uma célula do Resumo (Disponível G ou Inventário J)
-  const handleUpdateRes = (index: number, key: 'G' | 'J', value: number) => {
+  // Atualização de uma célula do Resumo (Disponível G ou Inventário J) por código do produto
+  const handleUpdateRes = (code: number, key: 'G' | 'J', value: number) => {
+    const index = data.res.findIndex((r) => r[0] === code);
+    if (index < 0) return;
+
     const newRes = [...data.res];
     const row = [...newRes[index]] as ResRow;
     const colIndex = key === 'G' ? 3 : 7;
@@ -206,7 +249,12 @@ export default function App() {
     newRes[index] = row;
 
     const desc = `Alterou ${key === 'G' ? 'Disponível Promax' : 'Inventário'} do item ${row[0]} (${row[1]}) de ${oldVal} para ${value}`;
-    const nextData = { ...data, res: newRes };
+    const nextData: RawData = {
+      ...data,
+      res: newRes,
+      gradeRes: data.gradeRes ? newRes.map((r) => [...r] as ResRow) : undefined,
+      ecSyncHash: data.ec?.r?.length ? computeEcContentHash(data.ec) : data.ecSyncHash,
+    };
     updateDataWithHistory(nextData, desc);
   };
 
@@ -222,41 +270,141 @@ export default function App() {
     setIsImportModalOpen(true);
   };
 
-  // Snapshots removidos
-  const [snapshots] = useState<DashboardSnapshot[]>([]);
-  const handleSaveSnapshot = () => {};
-  const handleDeleteSnapshot = () => {};
+  // Salvamento diário isolado no Firebase (diferencas_diarias_salvas/{YYYY-MM-DD}) acionado pelo modal SALVAR 02.05.02 DO DIA
+  const handleSaveSnapshot = async (snapshot: DashboardSnapshot) => {
+    const targetDateKey = snapshot.date || getLocalDateKey();
+    const [yearStr, monthStr, dayStr] = targetDateKey.split('-');
+    const targetYear = Number(yearStr);
+    const targetMonth = Number(monthStr);
+    const targetDay = Number(dayStr);
+    const dayIndex = targetDay - 1;
+
+    const now = new Date();
+    const isCurrentActiveMonth =
+      targetYear === now.getFullYear() && targetMonth === now.getMonth() + 1;
+
+    const existingAction = savedDailyDiffs[targetDateKey]?.sourceAction;
+    const sourceActionToSave: 'CONGELAR' | 'SALVAR_DIF' =
+      existingAction === 'CONGELAR' ? 'CONGELAR' : 'SALVAR_DIF';
+
+    const isolatedRecord = buildIsolatedDailyDiffRecord(
+      targetDateKey,
+      calculatedProducts,
+      data.xs,
+      data.desativados || [],
+      sourceActionToSave
+    );
+
+    const okDaily = await saveDailyDiffToFirestore(isolatedRecord);
+    const updatedDiffs = { ...savedDailyDiffs, [targetDateKey]: isolatedRecord };
+    setSavedDailyDiffs(updatedDiffs);
+
+    let newMen = data.men;
+    if (isCurrentActiveMonth && dayIndex >= 0 && dayIndex < 31) {
+      const menMap = new Map<number, number>();
+      newMen = data.men.map((row, idx) => {
+        menMap.set(row[0], idx);
+        return [...row] as MenRow;
+      });
+      calculatedProducts.forEach((calc) => {
+        const code = calc.c;
+        const diff = calc.R;
+        if (menMap.has(code)) {
+          const idx = menMap.get(code)!;
+          const row = newMen[idx];
+          const days = [...row[4]];
+          days[dayIndex] = diff;
+          const newTotal = days.reduce<number>((acc, v) => acc + (v || 0), 0);
+          newMen[idx] = [row[0], calc.d || row[1], calc.X || row[2], row[3], days, newTotal];
+        } else {
+          const days: (number | null)[] = new Array(31).fill(null);
+          days[dayIndex] = diff;
+          newMen.push([calc.c, calc.d, calc.X, 0, days, diff]);
+          menMap.set(code, newMen.length - 1);
+        }
+      });
+    }
+
+    const nextData: RawData = {
+      ...data,
+      men: newMen,
+    };
+    const actionDesc = `Salvou 02.05.02 e DIF do dia ${isolatedRecord.dateBR} (${snapshot.label || 'Fechamento'})`;
+    pushHistory(nextData, actionDesc);
+    setData(nextData);
+    await saveStateToFirestore(nextData, actionDesc, undefined, true);
+
+    if (okDaily) {
+      setToastMessage(`✓ 02.05.02 e fechamento do dia ${isolatedRecord.dateBR} salvos no Firebase!`);
+    } else {
+      setToastMessage(`⚠️ Falha temporária ao salvar no Firebase para ${isolatedRecord.dateBR}.`);
+    }
+  };
 
   // Importação do relatório 02.05.02 (Centralizado na aba de Estoque Central e propagado para toda a plataforma)
-  const handleImport020502 = (
+  const handleImport020502 = async (
     content: string,
     fileName: string,
     targetTab: 'dashboard' | 'ec' | 'grade' = 'ec',
     autoSaveDailySnapshot: boolean = false
   ) => {
     try {
-      const res = process020502(content, fileName, data, 'ec');
+      const effectiveTarget = targetTab === 'grade' ? 'grade' : 'ec';
+      const res = process020502(content, fileName, data, effectiveTarget);
       if (res.success && res.nextData) {
         let finalData = res.nextData;
 
+        if (autoSaveDailySnapshot && effectiveTarget !== 'grade') {
+          const todayDateKey = getLocalDateKey();
+          const newCalcs = calculateProducts(finalData).C;
+          const isolatedRecord = buildIsolatedDailyDiffRecord(
+            todayDateKey,
+            newCalcs,
+            finalData.xs,
+            finalData.desativados || [],
+            'SALVAR_DIF'
+          );
+          await saveDailyDiffToFirestore(isolatedRecord);
+          setSavedDailyDiffs((prev) => ({ ...prev, [todayDateKey]: isolatedRecord }));
+        }
 
-
-        updateDataWithHistory(finalData, `Importação 02.05.02 (Estoque Central): ${fileName}`);
+        updateDataWithHistory(
+          finalData,
+          effectiveTarget === 'grade'
+            ? `Importação 02.05.02 (Grade): ${fileName}`
+            : `Importação 02.05.02 (Estoque Central): ${fileName}`
+        );
         setEcBannerHtml(res.bannerHtml || null);
         setIsImportModalOpen(false);
-        setToastMessage(`✓ Relatório 02.05.02 importado com sucesso no Estoque Central!`);
+        setToastMessage(
+          autoSaveDailySnapshot && effectiveTarget !== 'grade'
+            ? `✓ Relatório 02.05.02 importado no Estoque Central e fechamento de hoje salvo no Firebase!`
+            : `✓ Relatório 02.05.02 importado com sucesso no Estoque Central!`
+        );
       } else {
-        alert(res.message || 'Erro ao processar importação 02.05.02');
+        setToastMessage(`⚠️ ${res.message || 'Erro ao processar importação 02.05.02'}`);
       }
     } catch (e: any) {
-      alert(`Falha ao importar: ${e?.message || e}`);
+      setToastMessage(`⚠️ Falha ao importar: ${e?.message || e}`);
+    }
+  };
+
+  // Sincronização manual imediata da 02.05.02 do Estoque Central para o Dashboard e Resumo
+  const handleSyncEcWithDashboard = () => {
+    const syncRes = syncEcWithDashboard(data);
+    if (syncRes.success && syncRes.nextData) {
+      updateDataWithHistory(syncRes.nextData, 'Sincronizou Estoque Central (02.05.02) com Dashboard');
+      setEcBannerHtml(syncRes.bannerHtml || null);
+      setToastMessage('✓ Dashboard e Resumo sincronizados com a 02.05.02 do Estoque Central!');
+    } else {
+      setToastMessage(`⚠️ ${syncRes.message || 'Não foi possível sincronizar o Estoque Central.'}`);
     }
   };
 
   // Carrega uma 02.05.02 salva histórica diretamente para o Estoque Central e navega para a aba
   const handleLoadSaved020502ToPlatform = (snapshot: DashboardSnapshot) => {
     if (!snapshot.ec || !snapshot.ec.h || !snapshot.ec.r || snapshot.ec.r.length === 0) {
-      alert('Os dados da 02.05.02 desta data não estão disponíveis ou estão vazios.');
+      setToastMessage('⚠️ Os dados da 02.05.02 desta data não estão disponíveis ou estão vazios.');
       return;
     }
 
@@ -266,39 +414,20 @@ export default function App() {
         r: snapshot.ec.r.map((row) => [...row]),
       };
 
-      let nextRes = data.res;
+      let nextData: RawData;
       if (snapshot.res && Array.isArray(snapshot.res) && snapshot.res.length > 0) {
-        nextRes = snapshot.res.map((r) => [...r] as typeof r);
+        nextData = {
+          ...data,
+          ec: newEc,
+          ecSyncHash: computeEcContentHash(newEc),
+          res: snapshot.res.map((r) => [...r] as typeof r),
+          gradeRes: data.gradeRes ? snapshot.res.map((r) => [...r] as typeof r) : undefined,
+        };
       } else {
-        const ip = newEc.h.indexOf('Produto') >= 0 ? newEc.h.indexOf('Produto') : 3;
-        const idisp = newEc.h.indexOf('Disponivel') >= 0 ? newEc.h.indexOf('Disponivel') : 11;
-        const ecMap = new Map<number, number>();
-        newEc.r.forEach((r) => {
-          const cod = Number(r[ip]);
-          const disp = parseColL(r[idisp]);
-          if (!isNaN(cod) && cod > 0) {
-            ecMap.set(cod, disp);
-          }
-        });
-
-        nextRes = data.res.map((r) => {
-          const cod = r[0];
-          if (ecMap.has(cod)) {
-            const rowCopy = [...r] as typeof r;
-            const fator = rowCopy[4] > 0 ? rowCopy[4] : 1;
-            const dispCx = ecMap.get(cod) || 0;
-            rowCopy[3] = Math.round(dispCx * fator);
-            return rowCopy;
-          }
-          return r;
-        });
+        const baseWithNewEc: RawData = { ...data, ec: newEc };
+        const syncRes = syncEcWithDashboard(baseWithNewEc);
+        nextData = syncRes.success && syncRes.nextData ? syncRes.nextData : baseWithNewEc;
       }
-
-      const nextData: RawData = {
-        ...data,
-        ec: newEc,
-        res: nextRes,
-      };
 
       updateDataWithHistory(
         nextData,
@@ -312,7 +441,7 @@ export default function App() {
       );
     } catch (e: any) {
       console.error('Erro ao carregar 02.05.02:', e);
-      alert(`Falha ao carregar relatório: ${e?.message || e}`);
+      setToastMessage(`⚠️ Falha ao carregar relatório: ${e?.message || e}`);
     }
   };
 
@@ -327,11 +456,12 @@ export default function App() {
         );
         setPrecosBannerHtml(res.bannerHtml || null);
         setIsImportPrecosModalOpen(false);
+        setToastMessage(`✓ Tabela de Preços importada (${res.matchedCount} produtos atualizados)!`);
       } else {
-        alert(res.message || 'Erro ao processar Tabela de Preços');
+        setToastMessage(`⚠️ ${res.message || 'Erro ao processar Tabela de Preços'}`);
       }
     } catch (e: any) {
-      alert(`Falha ao importar Tabela de Preços: ${e?.message || e}`);
+      setToastMessage(`⚠️ Falha ao importar Tabela de Preços: ${e?.message || e}`);
     }
   };
 
@@ -353,7 +483,7 @@ export default function App() {
           .filter((l) => l.length > 0);
 
         if (lines.length < 2) {
-          alert('Arquivo 02.05.02 vazio ou sem linhas suficientes.');
+          setToastMessage('⚠️ Arquivo 02.05.02 vazio ou sem linhas suficientes.');
           return;
         }
         let sep = ';';
@@ -361,7 +491,7 @@ export default function App() {
         if ((firstLines.match(/\t/g) || []).length > (firstLines.match(/;/g) || []).length) {
           sep = '\t';
         }
-        const body = lines.map((l) => l.split(sep).map((c) => c.trim().replace(/^"|"$/g, '').trim()));
+        const body = lines.map((l) => splitDelimitedLine(l, sep));
         const header = body[0];
         const dataRows = body.slice(1);
 
@@ -379,7 +509,7 @@ export default function App() {
         setToastMessage(`✓ Relatório 02.05.02 importado com sucesso na Grade! (${dataRows.length} itens)`);
       }
     } catch (e: any) {
-      alert(`Erro ao importar 02.05.02 para a Grade: ${e?.message || e}`);
+      setToastMessage(`⚠️ Erro ao importar 02.05.02 para a Grade: ${e?.message || e}`);
     }
   };
 
@@ -396,10 +526,10 @@ export default function App() {
         updateDataWithHistory(nextData, `Importou 02.03.04 para a Grade: ${fileName} (${count} produtos)`);
         setToastMessage(`✓ Relatório 02.03.04 importado: ${count} produtos carregados na coluna Saldo!`);
       } else {
-        alert(res.message || 'Erro ao processar importação 02.03.04');
+        setToastMessage(`⚠️ ${res.message || 'Erro ao processar importação 02.03.04'}`);
       }
     } catch (e: any) {
-      alert(`Falha ao importar 02.03.04 para a Grade: ${e?.message || e}`);
+      setToastMessage(`⚠️ Falha ao importar 02.03.04 para a Grade: ${e?.message || e}`);
     }
   };
 
@@ -416,7 +546,7 @@ export default function App() {
   // Importação de Tabela 7
   const handleImportT7 = (content: string, fileName: string) => {
     try {
-      const lines = content.split('\n');
+      const lines = String(content).replace(/\r/g, '').split('\n');
       let count = 0;
       const newRes = [...data.res];
       const resMap = new Map(newRes.map((r, i) => [r[0], i]));
@@ -424,9 +554,9 @@ export default function App() {
       lines.forEach((line) => {
         const cleanLine = line.trim();
         if (!cleanLine) return;
-        let parts = cleanLine.split('\t');
-        if (parts.length < 2) parts = cleanLine.split(';');
-        if (parts.length < 2) parts = cleanLine.split(',');
+        let parts = splitDelimitedLine(cleanLine, '\t');
+        if (parts.length < 2) parts = splitDelimitedLine(cleanLine, ';');
+        if (parts.length < 2) parts = splitDelimitedLine(cleanLine, ',');
 
         if (parts.length >= 2) {
           const codStr = parts[0].trim().replace(/\D/g, '');
@@ -453,35 +583,309 @@ export default function App() {
         }
       });
 
-      const nextData = { ...data, res: newRes, gradeRes: newRes };
+      if (count === 0) {
+        setToastMessage(`⚠️ Nenhum produto correspondente foi encontrado no arquivo ${fileName}.`);
+        return;
+      }
+
+      const nextData: RawData = {
+        ...data,
+        res: newRes,
+        gradeRes: newRes.map((r) => [...r] as ResRow),
+        ecSyncHash: data.ec?.r?.length ? computeEcContentHash(data.ec) : data.ecSyncHash,
+      };
       updateDataWithHistory(nextData, `Importou Tabela 7 (${fileName}): ${count} produtos`);
       setT7BannerHtml(`<b>Tabela 7 importada com sucesso:</b> ${count} produtos atualizados a partir de ${fileName}.`);
+      setToastMessage(`✓ Tabela 7 importada: ${count} produtos atualizados!`);
     } catch (e: any) {
-      alert(`Erro ao importar Tabela 7: ${e?.message || e}`);
+      setToastMessage(`⚠️ Erro ao importar Tabela 7: ${e?.message || e}`);
     }
+  };
+
+  // Helpers para gravação 100% isolada por data no Firebase (diferencas_diarias_salvas/{YYYY-MM-DD})
+  const getLocalDateKey = (d: Date = new Date()): string => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const buildIsolatedDailyDiffRecord = (
+    dateKey: string,
+    prods: CalculatedProduct[],
+    xs: number[],
+    desativados: number[],
+    sourceAction: 'CONGELAR' | 'SALVAR_DIF'
+  ): SavedDailyDiffRecord => {
+    const [yearStr, monthStr, dayStr] = dateKey.split('-');
+    const year = Number(yearStr);
+    const month = Number(monthStr);
+    const day = Number(dayStr);
+    const dateBR = `${dayStr}/${monthStr}/${yearStr}`;
+
+    const desativadosSet = new Set(desativados || []);
+    const active = prods.filter((p) => !desativadosSet.has(p.c) && !p.desativado);
+    const sv0 = (r: CalculatedProduct) => (xs.includes(r.c) ? 0 : r.S);
+
+    const faltas = active.filter((r) => r.R < 0);
+    const sobras = active.filter((r) => r.R > 0 && sv0(r) >= 0);
+
+    const totalFaltas = sum(faltas, (r) => -r.S);
+    const totalSobras = sum(sobras, sv0);
+    const saldoFinal = totalSobras - totalFaltas;
+
+    const items: SavedDailyDiffItem[] = active.map((r) => ({
+      cod: r.c,
+      desc: r.d,
+      fatorCx: r.V || 1,
+      fatorHl: r.X || 0,
+      precoCx: r.U || 0,
+      difCx: r.R,
+      difValor: r.R > 0 && xs.includes(r.c) ? 0 : r.S,
+    }));
+
+    return {
+      dateKey,
+      dateBR,
+      day,
+      month,
+      year,
+      savedAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      sourceAction,
+      summary: {
+        totalFaltas,
+        totalSobras,
+        saldoFinal,
+        faltasCount: faltas.length,
+        sobrasCount: sobras.length,
+        divergenciasCount: faltas.length + sobras.length,
+        totalProdutos: active.length,
+      },
+      items,
+    };
+  };
+
+  // Obtém o registro salvo imediatamente anterior à data alvo (para comparativo sem mesclar datas)
+  const getPriorDiffMapForDate = (
+    targetDateKey: string,
+    allDiffs: Record<string, SavedDailyDiffRecord>
+  ): Map<number, number> | null => {
+    const priorKeys = Object.keys(allDiffs)
+      .filter((k) => k < targetDateKey)
+      .sort();
+    if (priorKeys.length === 0) return null;
+    const latestPrior = allDiffs[priorKeys[priorKeys.length - 1]];
+    const map = new Map<number, number>();
+    latestPrior.items.forEach((it) => map.set(it.cod, it.difCx));
+    return map;
   };
 
   // Ações do Dashboard
   const handleCongelar = () => {
+    const todayDateKey = getLocalDateKey();
     runProtectedAction(async () => {
-    setConfirmModal({
-      isOpen: true,
-      title: 'Congelar & Salvar Conciliação do Dia',
-      message: 'Deseja congelar as diferenças e salvar automaticamente a conciliação do dia atual (Dia 15) no histórico mensal (DIF Mensal)?',
-      onConfirm: async () => {
-        const targetDay = new Date().getDate(); // Dia 15
-        const dayIndex = targetDay - 1;
+      setConfirmModal({
+        isOpen: true,
+        title: 'Finalizar Conciliação e Congelar',
+        message: `Deseja finalizar a conciliação de hoje (${todayDateKey.split('-').reverse().join('/')}), congelar a 02.05.02 (Coluna L) e as divergências atuais no Dashboard, criar a aba isolada no Firebase (diferencas_diarias_salvas/${todayDateKey}) e atualizar a DIF Diária e DIF Mensal?`,
+        onConfirm: async () => {
+          const targetDay = new Date().getDate();
+          const dayIndex = targetDay - 1;
 
-        // 1. Mapeia as linhas de data.men existentes pelo código do produto
+          // 1. Cria a aba 100% isolada desta data exata no Firebase (sem mesclar com nenhum outro dia)
+          const isolatedRecord = buildIsolatedDailyDiffRecord(
+            todayDateKey,
+            calculatedProducts,
+            data.xs,
+            data.desativados || [],
+            'CONGELAR'
+          );
+
+          // 2. Congela a 02.05.02 atual (Coluna L - Disponível Fiscal) para exibição na Exportação de Grade
+          const ecForFreeze =
+            data.ec && Array.isArray(data.ec.r) && data.ec.r.length > 0
+              ? data.ec
+              : data.gradeEc && Array.isArray(data.gradeEc.r) && data.gradeEc.r.length > 0
+              ? data.gradeEc
+              : null;
+
+          const frozen020502: Record<number, number> = {};
+          if (ecForFreeze && Array.isArray(ecForFreeze.r)) {
+            const headers = (ecForFreeze.h || []).map((h) =>
+              String(h || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase()
+                .trim()
+            );
+            let pIdx = headers.findIndex(
+              (h) =>
+                h === 'produto' ||
+                h === 'codigo' ||
+                h === 'cod produto' ||
+                h === 'cod prod' ||
+                h === 'cod' ||
+                h === 'mercadoria'
+            );
+            let dispIdx = headers.findIndex(
+              (h) => h === 'disponivel' || h === 'disponivel fiscal' || h === 'saldo grade real'
+            );
+            if (pIdx < 0) pIdx = 3;
+            if (dispIdx < 0) dispIdx = 11;
+
+            ecForFreeze.r.forEach((row) => {
+              if (!row || !Array.isArray(row)) return;
+              let code = 0;
+              if (row[pIdx] !== undefined && row[pIdx] !== null) {
+                const v = String(row[pIdx]).trim().replace(/^0+/, '');
+                const num = Number(v);
+                if (!isNaN(num) && num > 10 && num < 99999999) {
+                  code = num;
+                }
+              }
+              if (!code) {
+                for (const c of [3, 0, 1, 2]) {
+                  const v = String(row[c] || '').trim().replace(/^0+/, '');
+                  const n = Number(v);
+                  if (!isNaN(n) && n > 10 && n < 99999999) {
+                    code = n;
+                    break;
+                  }
+                }
+              }
+              if (code <= 0) return;
+
+              let dispVal = 0;
+              if (row.length > dispIdx && row[dispIdx] !== undefined && row[dispIdx] !== '') {
+                dispVal = parseColL(row[dispIdx]);
+              } else if (row.length > 11 && row[11] !== undefined && row[11] !== '') {
+                dispVal = parseColL(row[11]);
+              }
+              frozen020502[code] = Math.max(0, Math.round(dispVal));
+            });
+          } else {
+            calculatedProducts.forEach((p) => {
+              frozen020502[p.c] = Math.max(0, Math.round(p.H));
+            });
+          }
+
+          const frozen020502At = new Date().toLocaleString('pt-BR', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+
+          // 3. Atualiza o dia correspondente do mês atual na DIF Mensal
+          const menMap = new Map<number, number>();
+          const newMen: MenRow[] = data.men.map((row, idx) => {
+            menMap.set(row[0], idx);
+            return [...row] as MenRow;
+          });
+
+          let nonZeroCount = 0;
+
+          calculatedProducts.forEach((calc) => {
+            const code = calc.c;
+            const diff = calc.R;
+
+            if (menMap.has(code)) {
+              const idx = menMap.get(code)!;
+              const row = newMen[idx];
+              const days = [...row[4]];
+              days[dayIndex] = diff;
+              const newTotal = days.reduce<number>((acc, v) => acc + (v || 0), 0);
+              newMen[idx] = [row[0], calc.d || row[1], calc.X || row[2], row[3], days, newTotal];
+              if (diff !== 0) nonZeroCount++;
+            } else {
+              const days: (number | null)[] = new Array(31).fill(null);
+              days[dayIndex] = diff;
+              newMen.push([calc.c, calc.d, calc.X, 0, days, diff]);
+              menMap.set(code, newMen.length - 1);
+              if (diff !== 0) nonZeroCount++;
+            }
+          });
+
+          // 4. Congela data.dia com a diferença atual (DIF CONGELADA = DIA ATUAL = currDiff)
+          const nextDia: DiaRow[] = calculatedProducts.map((p) => {
+            const currDiff = p.R;
+            return [p.c, currDiff, currDiff];
+          });
+
+          const nextData: RawData = {
+            ...data,
+            men: newMen,
+            dia: nextDia,
+            frozen020502,
+            frozen020502At,
+          };
+
+          const actionDesc = `Conciliação e 02.05.02 congeladas em ${isolatedRecord.dateBR} (${nonZeroCount} divergências)`;
+          setSavedDailyDiffs((prev) => ({ ...prev, [todayDateKey]: isolatedRecord }));
+          pushHistory(nextData, actionDesc);
+          setData(nextData);
+          setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+          setToastMessage(
+            `❄️ Conciliação e 02.05.02 congeladas (${isolatedRecord.dateBR} — ${nonZeroCount} divergências).`
+          );
+
+          await Promise.all([
+            saveDailyDiffToFirestore(isolatedRecord),
+            saveStateToFirestore(nextData, 'Congelar ' + isolatedRecord.dateBR, actionDesc, true),
+          ]);
+        },
+      });
+    });
+  };
+
+  const handleSalvar = () => {
+    setIsSalvarDifModalOpen(true);
+  };
+
+  const handleConfirmSaveDif = (targetDateKey: string) => {
+    runProtectedAction(async () => {
+      const [yearStr, monthStr, dayStr] = targetDateKey.split('-');
+      const targetYear = Number(yearStr);
+      const targetMonth = Number(monthStr);
+      const targetDay = Number(dayStr);
+      const dayIndex = targetDay - 1;
+
+      const now = new Date();
+      const isCurrentActiveMonth =
+        targetYear === now.getFullYear() && targetMonth === now.getMonth() + 1;
+
+      // 1. Grava PRIMEIRO na aba 100% isolada do Firebase para aquela data específica:
+      //    diferencas_diarias_salvas/{YYYY-MM-DD} — nunca mescla com outros dias!
+      const existingAction = savedDailyDiffs[targetDateKey]?.sourceAction;
+      const sourceActionToSave: 'CONGELAR' | 'SALVAR_DIF' =
+        existingAction === 'CONGELAR' ? 'CONGELAR' : 'SALVAR_DIF';
+
+      const isolatedRecord = buildIsolatedDailyDiffRecord(
+        targetDateKey,
+        calculatedProducts,
+        data.xs,
+        data.desativados || [],
+        sourceActionToSave
+      );
+      const okDaily = await saveDailyDiffToFirestore(isolatedRecord);
+      const updatedDiffs = { ...savedDailyDiffs, [targetDateKey]: isolatedRecord };
+      setSavedDailyDiffs(updatedDiffs);
+
+      // 2. Só atualiza a grade mensal (data.men) se a data escolhida pertencer ao mês/ano ativo,
+      //    evitando mesclar lançamentos de meses diferentes (ex: Outubro vs Novembro).
+      let newMen = data.men;
+      let updatedCount = isolatedRecord.summary.totalProdutos;
+      const nonZeroCount = isolatedRecord.summary.divergenciasCount;
+
+      if (isCurrentActiveMonth && dayIndex >= 0 && dayIndex < 31) {
         const menMap = new Map<number, number>();
-        const newMen: MenRow[] = data.men.map((row, idx) => {
+        newMen = data.men.map((row, idx) => {
           menMap.set(row[0], idx);
           return [...row] as MenRow;
         });
 
-        let updatedCount = 0;
-        let nonZeroCount = 0;
-
+        updatedCount = 0;
         calculatedProducts.forEach((calc) => {
           const code = calc.c;
           const diff = calc.R;
@@ -494,118 +898,57 @@ export default function App() {
             const newTotal = days.reduce<number>((acc, v) => acc + (v || 0), 0);
             newMen[idx] = [row[0], calc.d || row[1], calc.X || row[2], row[3], days, newTotal];
             updatedCount++;
-            if (diff !== 0) nonZeroCount++;
           } else {
             const days: (number | null)[] = new Array(31).fill(null);
             days[dayIndex] = diff;
             newMen.push([calc.c, calc.d, calc.X, 0, days, diff]);
             menMap.set(code, newMen.length - 1);
             updatedCount++;
-            if (diff !== 0) nonZeroCount++;
           }
         });
+      }
 
-        // 2. Atualiza também data.dia (congelando as diferenças do dia)
+      // 3. Atualiza data.dia apenas se esta for a data mais recente gravada (mantendo comparativo isolado)
+      const allKeys = Object.keys(updatedDiffs).sort();
+      const latestKey = allKeys[allKeys.length - 1] || targetDateKey;
+      let nextDia = data.dia;
+
+      if (targetDateKey >= latestKey) {
+        const priorMap = getPriorDiffMapForDate(targetDateKey, updatedDiffs);
         const existingDiaMap = new Map<number, [number, number, number]>();
         data.dia.forEach((d) => existingDiaMap.set(d[0], d));
 
-        const nextDia: DiaRow[] = calculatedProducts.map((p) => {
+        nextDia = calculatedProducts.map((p) => {
           const currDiff = p.R;
           const prev = existingDiaMap.get(p.c);
-          const gq = prev ? prev[2] : 0;
-          return [p.c, currDiff, gq];
+          const prevEq = priorMap
+            ? (priorMap.get(p.c) ?? 0)
+            : (prev ? prev[2] : 0);
+          return [p.c, prevEq, currDiff];
         });
+      }
 
-        const nextData: RawData = {
-          ...data,
-          men: newMen,
-          dia: nextDia,
-        };
+      const nextData: RawData = {
+        ...data,
+        men: newMen,
+        dia: nextDia,
+      };
 
-        const actionDesc = `Congelamento e salvamento automático da conciliação no Dia ${targetDay} (${nonZeroCount} divergências)`;
-        pushHistory(nextData, actionDesc);
-        setData(nextData);
-        await saveStateToFirestore(nextData, 'Congelar Dia ' + targetDay, actionDesc, true);
+      const actionDesc = `Salva DIF isolada (${isolatedRecord.dateBR}) em diferencas_diarias_salvas/${targetDateKey} (${nonZeroCount} divergências)`;
+      pushHistory(nextData, actionDesc);
+      setData(nextData);
 
-        setConfirmModal((prev) => ({ ...prev, isOpen: false }));
-        setToastMessage(`✅ Conciliação do Dia ${targetDay} congelada e salva com sucesso (${nonZeroCount} divergências)!`);
-      },
-    });
-  });
-};
-
-  const handleSalvar = () => {
-    setIsSalvarDifModalOpen(true);
-  };
-
-  const handleConfirmSaveDif = (targetDay: number) => {
-    runProtectedAction(async () => {
-    const dayIndex = targetDay - 1;
-
-    // 1. Mapeia as linhas de data.men existentes pelo código do produto
-    const menMap = new Map<number, number>();
-    const newMen: MenRow[] = data.men.map((row, idx) => {
-      menMap.set(row[0], idx);
-      return [...row] as MenRow;
-    });
-
-    let updatedCount = 0;
-    let nonZeroCount = 0;
-
-    // 2. Grava a diferença em caixas para cada produto da conciliação
-    calculatedProducts.forEach((calc) => {
-      const code = calc.c;
-      const diff = calc.R;
-
-      if (menMap.has(code)) {
-        const idx = menMap.get(code)!;
-        const row = newMen[idx];
-        const days = [...row[4]];
-        days[dayIndex] = diff;
-        const newTotal = days.reduce<number>((acc, v) => acc + (v || 0), 0);
-        newMen[idx] = [row[0], calc.d || row[1], calc.X || row[2], row[3], days, newTotal];
-        updatedCount++;
-        if (diff !== 0) nonZeroCount++;
+      // 4. Sincroniza estado principal no Firebase
+      const okState = await saveStateToFirestore(nextData, 'Salvamento DIF ' + isolatedRecord.dateBR, actionDesc, true);
+      if (okDaily || okState) {
+        setToastMessage(
+          `✅ Aba isolada ${isolatedRecord.dateBR} salva no Firebase (diferencas_diarias_salvas/${targetDateKey}) — ${updatedCount} itens.`
+        );
       } else {
-        const days: (number | null)[] = new Array(31).fill(null);
-        days[dayIndex] = diff;
-        newMen.push([calc.c, calc.d, calc.X, 0, days, diff]);
-        menMap.set(code, newMen.length - 1);
-        updatedCount++;
-        if (diff !== 0) nonZeroCount++;
+        setToastMessage(`⚠️ DIF do dia ${isolatedRecord.dateBR} salva localmente (falha temporária de conexão com Firebase).`);
       }
     });
-
-    // 3. Atualiza também data.dia (congelando as diferenças do dia para o comparativo / DIF 1)
-    const existingDiaMap = new Map<number, [number, number, number]>();
-    data.dia.forEach((d) => existingDiaMap.set(d[0], d));
-
-    const nextDia: DiaRow[] = calculatedProducts.map((p) => {
-      const currDiff = p.R;
-      const prev = existingDiaMap.get(p.c);
-      const gq = prev ? prev[2] : 0;
-      return [p.c, currDiff, gq];
-    });
-
-    const nextData: RawData = {
-      ...data,
-      men: newMen,
-      dia: nextDia,
-    };
-
-    const actionDesc = `Salva DIF da conciliação no Dia ${targetDay} da DIF Mensal (${nonZeroCount} divergências)`;
-    pushHistory(nextData, actionDesc);
-    setData(nextData);
-
-    // 4. Salva e sincroniza com Firebase (imediato com backoff resiliente)
-    const success = await saveStateToFirestore(nextData, 'Salvamento DIF Dia ' + targetDay, actionDesc, true);
-    if (success) {
-      alert(`DIF do Dia ${targetDay} salva com sucesso na DIF Mensal e sincronizada com o Firebase!\n\n${updatedCount} produtos atualizados no calendário (${nonZeroCount} com divergência).`);
-    } else {
-      alert(`DIF salva localmente no Dia ${targetDay} da DIF Mensal. (Falha de conexão com o Firebase).`);
-    }
-  });
-};
+  };
 
   const handleLimpar = () => {
     setConfirmModal({
@@ -613,9 +956,31 @@ export default function App() {
       title: 'Limpar Diferenças (Zerar Divergências)',
       message: 'Deseja igualar o estoque físico ao sistema Promax e zerar todas as diferenças da conciliação atual (saldo zerado)?',
       onConfirm: () => {
+        const sAdj = { M: {} as Record<number, number>, N: {} as Record<number, number>, O: {} as Record<number, number> };
+        (data.aj?.so || []).forEach((r) => {
+          if (r[8] === 'Pendente') {
+            const c = Number(r[0]);
+            sAdj.M[c] = (sAdj.M[c] || 0) + Number(r[2] || 0);
+          }
+        });
+        (data.aj?.av || []).forEach((r) => {
+          if (r[4] === 'Pendente') {
+            const c = Number(r[1]);
+            sAdj.N[c] = (sAdj.N[c] || 0) + Number(r[3] || 0);
+          }
+        });
+        (data.aj?.fm || []).forEach((r) => {
+          const c = Number(r[0]);
+          sAdj.O[c] = (sAdj.O[c] || 0) + Number(r[2] || 0);
+        });
+
         const clearedRes = data.res.map((r) => {
           const row = [...r] as ResRow;
-          row[7] = row[3]; // contagem física b = Disponível Promax G (diferença zerada)
+          const c = row[0];
+          const M = sAdj.M[c] || 0;
+          const Nn = sAdj.N[c] || 0;
+          const Oo = sAdj.O[c] || 0;
+          row[7] = row[3] - Nn + M - Oo; // J = G (diferença zerada inclusive com ajustes pendentes)
           row[8] = 0;      // repack
           row[9] = 0;      // ajuste M
           row[10] = 0;     // ajuste N
@@ -623,7 +988,13 @@ export default function App() {
           return row;
         });
         const nextDia = data.dia.map((d) => [d[0], 0, 0] as [number, number, number]);
-        const nextData: RawData = { ...data, res: clearedRes, dia: nextDia };
+        const nextData: RawData = {
+          ...data,
+          res: clearedRes,
+          gradeRes: data.gradeRes ? clearedRes.map((r) => [...r] as ResRow) : undefined,
+          dia: nextDia,
+          ecSyncHash: data.ec?.r?.length ? computeEcContentHash(data.ec) : data.ecSyncHash,
+        };
         updateDataWithHistory(nextData, 'Limpeza e regularização das diferenças (Base Zerada)');
         setConfirmModal((prev) => ({ ...prev, isOpen: false }));
       },
@@ -650,7 +1021,20 @@ export default function App() {
     });
   };
 
-  const handleClearMenDay = (day: number) => {
+  const handleClearMenDay = async (day: number) => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const dStr = String(day).padStart(2, '0');
+    const dateKey = `${y}-${m}-${dStr}`;
+
+    await deleteDailyDiffFromFirestore(dateKey);
+    setSavedDailyDiffs((prev) => {
+      const next = { ...prev };
+      delete next[dateKey];
+      return next;
+    });
+
     let clearedCount = 0;
     const newMen = data.men.map((r) => {
       const row = [...r] as MenRow;
@@ -664,8 +1048,43 @@ export default function App() {
     });
     updateDataWithHistory(
       { ...data, men: newMen },
-      `Limpeza dos lançamentos do Dia ${day} na DIF Mensal (${clearedCount} produtos zerados)`
+      `Limpeza dos lançamentos do Dia ${day} (${dateKey}) na DIF Mensal e no Firebase (${clearedCount} produtos zerados)`
     );
+  };
+
+  const handleDeleteDailyDiff = async (dateKey: string) => {
+    const ok = await deleteDailyDiffFromFirestore(dateKey);
+    if (!ok) {
+      setToastMessage(`⚠️ Não foi possível excluir a aba ${dateKey} no Firebase.`);
+      return;
+    }
+
+    setSavedDailyDiffs((prev) => {
+      const next = { ...prev };
+      delete next[dateKey];
+      return next;
+    });
+
+    const [yStr, mStr, dStr] = dateKey.split('-');
+    const now = new Date();
+    const isCurrentMonth = Number(yStr) === now.getFullYear() && Number(mStr) === now.getMonth() + 1;
+    const dayNum = Number(dStr);
+
+    if (isCurrentMonth && dayNum >= 1 && dayNum <= 31) {
+      const newMen = data.men.map((r) => {
+        const row = [...r] as MenRow;
+        const days = [...row[4]];
+        days[dayNum - 1] = null;
+        const soma = days.reduce<number>((acc, v) => acc + (v || 0), 0);
+        return [row[0], row[1], row[2], row[3], days, soma] as MenRow;
+      });
+      updateDataWithHistory(
+        { ...data, men: newMen },
+        `Excluiu aba isolada ${dateKey.split('-').reverse().join('/')} do Firebase`
+      );
+    }
+
+    setToastMessage(`🗑️ Aba isolada ${dateKey.split('-').reverse().join('/')} removida do Firebase.`);
   };
 
   const handleResetAllMen = (options?: { resetFechamentoMode?: 'keep' | 'last_day' | 'zero' }) => {
@@ -704,29 +1123,64 @@ export default function App() {
     updateDataWithHistory({ ...data, men: newMen }, descMsg);
   };
 
-  // Undo / Redo
+  // Undo / Redo (com persistência no Firebase e atalhos Ctrl+Z / Ctrl+Y)
   const handleUndo = () => {
     if (historyIndex > 0) {
       const prevIndex = historyIndex - 1;
+      const restored = history[prevIndex].data;
+      const revertedAction = history[historyIndex]?.desc || 'última alteração';
       setHistoryIndex(prevIndex);
-      setData(history[prevIndex].data);
+      setData(restored);
+      saveStateToFirestore(restored, `Desfeito: ${revertedAction}`);
+      setToastMessage(`↩️ Desfeito: ${revertedAction}`);
     }
   };
 
   const handleRedo = () => {
     if (historyIndex < history.length - 1) {
       const nextIndex = historyIndex + 1;
+      const restored = history[nextIndex].data;
+      const redoneAction = history[nextIndex]?.desc || 'ação';
       setHistoryIndex(nextIndex);
-      setData(history[nextIndex].data);
+      setData(restored);
+      saveStateToFirestore(restored, `Refeito: ${redoneAction}`);
+      setToastMessage(`↪️ Refeito: ${redoneAction}`);
     }
   };
+
+  // Atalhos de teclado globais Ctrl+Z (Desfazer) e Ctrl+Y (Refazer)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        if (historyIndex > 0) {
+          e.preventDefault();
+          handleUndo();
+        }
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))
+      ) {
+        if (historyIndex < history.length - 1) {
+          e.preventDefault();
+          handleRedo();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
 
   // Recontagem States & Handlers
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (toastMessage) {
-      const t = setTimeout(() => setToastMessage(null), 3500);
+      const t = setTimeout(() => setToastMessage(null), 4000);
       return () => clearTimeout(t);
     }
   }, [toastMessage]);
@@ -748,6 +1202,25 @@ export default function App() {
 
     // Não muda de aba! Apenas informa com texto simples conforme solicitado
     setToastMessage(`Item ${code} enviado para a aba de Recontagem.`);
+  };
+
+  const handleToggleDiferencaConfirmada = (code: number, desc?: string) => {
+    const current = data.diferencaConfirmadaCodes || [];
+    const exists = current.includes(code);
+    const next = exists ? current.filter((c) => c !== code) : [...current, code];
+    const nextData: RawData = {
+      ...data,
+      diferencaConfirmadaCodes: next,
+    };
+    const actionDesc = exists
+      ? `Removeu marcação azul (não contar) do produto #${code} (${desc || ''})`
+      : `Marcou produto #${code} (${desc || ''}) em azul: diferença permaneceu e não precisa contar novamente`;
+    updateDataWithHistory(nextData, actionDesc);
+    setToastMessage(
+      exists
+        ? `Marcação azul removida do item #${code}.`
+        : `🔵 Item #${code} marcado em AZUL: diferença permaneceu e não precisa contar novamente!`
+    );
   };
 
   const handleUpdateRecontagem = (item: RecontagemItem, desc?: string) => {
@@ -817,10 +1290,12 @@ export default function App() {
     );
 
     const desc = `Recontagem aplicada na base: Item ${item.cod} (${item.desc}) ajustado para ${finalCx} cx (${finalUnid} un)`;
-    const nextData = {
+    const nextData: RawData = {
       ...data,
       res: nextRes,
+      gradeRes: data.gradeRes ? nextRes.map((r) => [...r] as ResRow) : undefined,
       recontagens: nextRecontagens,
+      ecSyncHash: data.ec?.r?.length ? computeEcContentHash(data.ec) : data.ecSyncHash,
     };
 
     updateDataWithHistory(nextData, desc);
@@ -905,7 +1380,11 @@ export default function App() {
     const nextData: RawData = {
       ...data,
       res: newRes,
-      gradeRes: data.gradeRes ? newRes : undefined,
+      gradeRes: data.gradeRes ? newRes.map((r) => [...r] as ResRow) : undefined,
+      priceOverrides: {
+        ...(data.priceOverrides || {}),
+        [code]: precoCx,
+      },
     };
 
     const actionDesc = `Definiu preço do produto #${code} (${updatedDesc || 'Item'}): R$ ${precoCx.toFixed(2).replace('.', ',')}`;
@@ -1011,7 +1490,8 @@ export default function App() {
     const nextData: RawData = {
       ...data,
       res: newRes,
-      gradeRes: data.gradeRes ? newRes : undefined,
+      gradeRes: data.gradeRes ? newRes.map((r) => [...r] as ResRow) : undefined,
+      ecSyncHash: data.ec?.r?.length ? computeEcContentHash(data.ec) : data.ecSyncHash,
     };
 
     updateDataWithHistory(nextData, `Aplicou contagem física de ${items.length} produtos ao inventário base`);
@@ -1179,7 +1659,10 @@ export default function App() {
 
         <button
           className={activeTab === 'produtos' ? 'on' : ''}
-          onClick={() => setActiveTab('produtos')}
+          onClick={() => {
+            setProdutosInitialQuery('');
+            setActiveTab('produtos');
+          }}
           style={
             activeTab === 'produtos'
               ? { background: '#0F172A', color: '#fff' }
@@ -1225,6 +1708,8 @@ export default function App() {
             onResetAll={handleResetAllMen}
             onUpdateMen={handleUpdateMen}
             onSalvarDifToday={() => setIsSalvarDifModalOpen(true)}
+            savedDailyDiffs={savedDailyDiffs}
+            onDeleteDailyDiff={handleDeleteDailyDiff}
           />
         )}
 
@@ -1250,6 +1735,7 @@ export default function App() {
             onClearPrecosBanner={() => setPrecosBannerHtml(null)}
             ec0304BannerHtml={ec0304BannerHtml}
             onClearEc0304Banner={() => setEc0304BannerHtml(null)}
+            onSyncWithDashboard={handleSyncEcWithDashboard}
           />
         )}
 
@@ -1281,6 +1767,8 @@ export default function App() {
           <DashboardView
             data={data}
             calculated={calculatedProducts}
+            savedDailyDiffs={savedDailyDiffs}
+            onSaveSnapshot={handleSaveSnapshot}
             onCongelar={handleCongelar}
             onSalvar={handleSalvar}
             onLimpar={handleLimpar}
@@ -1288,7 +1776,9 @@ export default function App() {
             onOpenImport020502={() => setActiveTab('ec')}
             onRecontar={handleRecontar}
             onToggleDesativar={handleToggleDesativar}
+            onToggleDiferencaConfirmada={handleToggleDiferencaConfirmada}
             onNavigateToProdutos={(search) => {
+              setProdutosInitialQuery(search || '');
               setActiveTab('produtos');
             }}
             onSavePopup={handleSavePopup}
@@ -1328,6 +1818,7 @@ export default function App() {
             data={data}
             calculatedProducts={calculatedProducts}
             calculatedMap={calculatedMap}
+            initialQuery={produtosInitialQuery}
             onRecontar={handleRecontar}
             onToggleDesativar={handleToggleDesativar}
             onNavigateToTab={(tab) => setActiveTab(tab as TabKey)}
@@ -1346,7 +1837,7 @@ export default function App() {
             bottom: '24px',
             right: '24px',
             zIndex: 9999,
-            background: 'rgba(24, 24, 27, 0.95)',
+            background: toastMessage.startsWith('⚠️') ? 'rgba(127, 29, 29, 0.96)' : 'rgba(24, 24, 27, 0.95)',
             color: '#fff',
             padding: '10px 16px',
             borderRadius: '6px',
@@ -1356,14 +1847,15 @@ export default function App() {
             display: 'flex',
             alignItems: 'center',
             gap: '8px',
-            borderLeft: '4px solid #FFC000',
+            borderLeft: toastMessage.startsWith('⚠️') ? '4px solid #F87171' : '4px solid #FFC000',
             borderTop: '1px solid #3f3f46',
             borderRight: '1px solid #3f3f46',
             borderBottom: '1px solid #3f3f46',
+            maxWidth: 'calc(100vw - 32px)',
           }}
         >
-          <span>✓</span>
-          <span>{toastMessage}</span>
+          <span>{toastMessage.startsWith('⚠️') ? '⚠️' : '✓'}</span>
+          <span>{toastMessage.startsWith('⚠️') ? toastMessage.replace(/^⚠️\s*/, '') : toastMessage}</span>
           <button
             type="button"
             onClick={() => setToastMessage(null)}

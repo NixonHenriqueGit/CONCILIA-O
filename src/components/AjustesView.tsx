@@ -76,7 +76,10 @@ export const AjustesView: React.FC<AjustesViewProps> = ({
     let val: string | number = valueStr;
 
     if (NU[b].includes(colIdx)) {
-      val = Number(valueStr) || 0;
+      const cleaned = valueStr.trim();
+      val = cleaned.includes(',')
+        ? parseFloat(cleaned.replace(/\./g, '').replace(',', '.')) || 0
+        : Number(cleaned) || 0;
     }
 
     rows[rowIdx][colIdx] = val;
@@ -146,7 +149,7 @@ export const AjustesView: React.FC<AjustesViewProps> = ({
       if (
         line.includes('<') || 
         line.includes('>') || 
-        line.includes('PK') || 
+        line.startsWith('PK') || 
         line.includes('xmlns') || 
         line.includes('metadata') || 
         line.includes('workbook')
@@ -229,7 +232,10 @@ export const AjustesView: React.FC<AjustesViewProps> = ({
     const a = document.createElement('a');
     a.href = url;
     a.download = `avarias_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const blockKeys: BlockKey[] = ['av', 'so', 'rp', 'fm'];
@@ -305,7 +311,10 @@ export const AjustesView: React.FC<AjustesViewProps> = ({
                     const a = document.createElement('a');
                     a.href = url;
                     a.download = `${TT[b].toLowerCase().replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
+                    document.body.appendChild(a);
                     a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
                   }}
                 >
                   Exportar CSV

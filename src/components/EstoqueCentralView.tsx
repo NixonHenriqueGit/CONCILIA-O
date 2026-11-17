@@ -24,6 +24,7 @@ interface EstoqueCentralViewProps {
   onImport020304?: (content: string, fileName: string) => void;
   ec0304BannerHtml?: string | null;
   onClearEc0304Banner?: () => void;
+  onSyncWithDashboard?: () => void;
 }
 
 export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
@@ -46,11 +47,13 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
   onImport020304,
   ec0304BannerHtml,
   onClearEc0304Banner,
+  onSyncWithDashboard,
 }) => {
   const [query, setQuery] = useState('');
   const [pastedText, setPastedText] = useState('');
   const [pastedPrecoText, setPastedPrecoText] = useState('');
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // Fonte efetiva de dados da 02.05.02 exibida na tabela
   const displayedEc = ec;
@@ -97,15 +100,33 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
     };
   }, [displayedEc.r, displayedEc.h, ip, okSet, query]);
 
+  const invStats = useMemo(() => {
+    let countWithInv = 0;
+    (displayedEc.r || []).forEach((r) => {
+      const invStr = String(r[12] ?? '').trim();
+      const countStr = String(r[28] ?? '').trim();
+      const hasInv = invStr && invStr !== '0/00' && invStr !== '0' && invStr !== '0,00' && invStr !== '0.00';
+      const hasCount = countStr && countStr !== '0' && countStr !== '';
+      if (hasInv || hasCount) {
+        countWithInv++;
+      }
+    });
+    return {
+      hasInventory: countWithInv > 0,
+      countWithInv,
+    };
+  }, [displayedEc.r]);
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setImportError(null);
     try {
       const { text, fileName } = await readFileToText(file);
       onImport(text, fileName);
     } catch (err: any) {
-      alert(err.message || 'Erro ao ler arquivo.');
+      setImportError(err.message || 'Erro ao ler arquivo.');
     }
     e.target.value = '';
   };
@@ -114,13 +135,14 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setImportError(null);
     try {
       const { text, fileName } = await readFileToText(file);
       if (onImportPrecos) {
         onImportPrecos(text, fileName);
       }
     } catch (err: any) {
-      alert(err.message || 'Erro ao ler tabela de preços.');
+      setImportError(err.message || 'Erro ao ler tabela de preços.');
     }
     e.target.value = '';
   };
@@ -143,6 +165,25 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
         <div className="k r">
           <small>NOK (fora do RESUMO)</small>
           <span>{nokCount}</span>
+        </div>
+        <div
+          className={`k ${invStats.hasInventory ? 'g' : ''}`}
+          style={
+            !invStats.hasInventory
+              ? {
+                  borderLeft: '4px solid #F59E0B',
+                  background: '#FFFBEB',
+                  color: '#92400E',
+                }
+              : undefined
+          }
+        >
+          <small>INVENTÁRIO PROMAX (COLUNA 12)</small>
+          <span style={{ fontSize: invStats.hasInventory ? '18px' : '12px', fontWeight: 'bold' }}>
+            {invStats.hasInventory
+              ? `${invStats.countWithInv} itens com contagem`
+              : 'Sem contagem física no Promax (0/00)'}
+          </span>
         </div>
       </div>
 
@@ -173,8 +214,6 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
           <Save size={14} color="#93C5FD" />
           <span>SALVAR 02.05.02 DO DIA</span>
         </button>
-
-
 
         <label
           className="btn"
@@ -220,7 +259,10 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
             const a = document.createElement('a');
             a.href = url;
             a.download = `estoque_central_${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a);
             a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
           }}
           className="btn"
           style={{ padding: '7px 14px', fontSize: '12px', background: '#0D9488', color: '#fff' }}
@@ -299,9 +341,37 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
         </div>
       )}
 
+      {/* Erro inline de leitura de arquivo */}
+      {importError && (
+        <div
+          style={{
+            margin: '0 24px 8px',
+            padding: '8px 14px',
+            background: '#FEF2F2',
+            border: '1px solid #FCA5A5',
+            color: '#991B1B',
+            borderRadius: '6px',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <span>⚠️ {importError}</span>
+          <button
+            type="button"
+            onClick={() => setImportError(null)}
+            style={{ background: 'transparent', border: 'none', color: '#991B1B', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Áreas Expansíveis de Colagem de Texto */}
-      <div style={{ display: 'flex', gap: '16px', margin: '0 24px 8px' }}>
-        <details style={{ flex: 1 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', margin: '0 24px 8px' }}>
+        <details style={{ flex: '1 1 280px', minWidth: 0 }}>
           <summary style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 'bold', color: '#475569' }}>
             ▶ Ou cole aqui o conteúdo do 02.05.02 (separado por ;)
           </summary>

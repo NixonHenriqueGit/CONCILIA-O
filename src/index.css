@@ -246,6 +246,7 @@ body {
   font: inherit;
   background: #fff;
   border-radius: 2px;
+  max-width: 100%;
 }
 
 .tools input:focus,
@@ -618,6 +619,13 @@ td {
   .tools {
     padding: 6px 12px !important;
   }
+  .blks {
+    flex-direction: column !important;
+    padding: 10px 12px !important;
+  }
+  .blk {
+    width: 100% !important;
+  }
 }
 
 .btn {
@@ -830,6 +838,8 @@ td {
   padding: 20px;
   max-width: 520px;
   width: 92%;
+  max-height: 92vh;
+  overflow-y: auto;
   box-shadow: 0 8px 24px rgba(0,0,0,0.3);
 }
 

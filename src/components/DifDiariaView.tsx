@@ -15,14 +15,15 @@ export const DifDiariaView: React.FC<DifDiariaViewProps> = ({
   const [filter, setFilter] = useState<'all' | 'dif' | 'f' | 's'>('all');
 
   const { items, badCount, sal, sob, fal, it, codeCounts } = useMemo(() => {
-    const list = data.dia.map((x, i) => {
+    const list = data.dia.map((x) => {
       const r = calculatedMap[x[0]];
-      const F = (r ? r.W : 0) * x[1];
-      const H = r ? r.S : 0;
-      const isMatchingOrder = x[0] === (data.res[i] || [])[0];
+      const unitValue = r ? (r.desativado ? 0 : r.U) : 0;
+      const F = unitValue * x[1];
+      const H = unitValue * x[2];
+      const isMatchingOrder = !!r;
       return {
         c: x[0],
-        d: r ? r.d : '',
+        d: r ? r.d : `Produto #${x[0]}`,
         eq: x[1],
         F,
         gq: x[2],
@@ -63,7 +64,7 @@ export const DifDiariaView: React.FC<DifDiariaViewProps> = ({
       it: withDiffCount,
       codeCounts: counts,
     };
-  }, [data.dia, data.res, calculatedMap]);
+  }, [data.dia, calculatedMap]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

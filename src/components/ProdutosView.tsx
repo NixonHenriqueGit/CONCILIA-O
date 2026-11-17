@@ -31,6 +31,7 @@ interface ProdutosViewProps {
   data: RawData;
   calculatedProducts: CalculatedProduct[];
   calculatedMap: Record<number, CalculatedProduct>;
+  initialQuery?: string;
   onRecontar?: (code: number) => void;
   onToggleDesativar?: (code: number) => void;
   onNavigateToTab?: (tab: string) => void;
@@ -130,13 +131,17 @@ export const ProdutosView: React.FC<ProdutosViewProps> = ({
   data,
   calculatedProducts,
   calculatedMap,
+  initialQuery = '',
   onRecontar,
   onToggleDesativar,
   onNavigateToTab,
   onUpdateProductPrice,
   onOpenImportPrecos,
 }) => {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery);
+  useEffect(() => {
+    setQuery(initialQuery);
+  }, [initialQuery]);
   const [categoryFilter, setCategoryFilter] = useState<ProductCategory>('todas');
   const [divergenceFilter, setDivergenceFilter] = useState<'all' | 'dif_only' | 'faltas' | 'sobras' | 'zero'>('all');
   const [stockFilter, setStockFilter] = useState<'all' | 'with_stock' | 'zero_stock'>('all');
@@ -188,7 +193,7 @@ export const ProdutosView: React.FC<ProdutosViewProps> = ({
       const W = fator > 0 ? preco / fator : preco;
       const I = prev.G * W;
       const L = prev.J * W;
-      const S = prev.desativado ? 0 : (L < 0 ? 0 : L - I);
+      const S = prev.desativado ? 0 : (L - I);
       return {
         ...prev,
         U: preco,
@@ -413,6 +418,7 @@ export const ProdutosView: React.FC<ProdutosViewProps> = ({
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   // Copiar dados da tabela

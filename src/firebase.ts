@@ -4,12 +4,15 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocs,
+  deleteDoc,
   collection,
   addDoc,
   serverTimestamp,
   onSnapshot,
 } from 'firebase/firestore';
-import { RawData, ContagemEstoqueItem } from './data/types';
+import { RawData, ContagemEstoqueItem, SavedDailyDiffRecord } from './data/types';
+import { applyFixedPricesToRes } from './data/fixedPrices';
 
 export const firebaseConfig = {
   apiKey: "AIzaSyCNeRWfV7L-i3X1GBegzETsEbpGkmK_s4g",
@@ -32,6 +35,7 @@ const MAIN_DOC = 'estado_atual';
 const EC_DOC = 'estoque_central';
 const CONTAGENS_DOC = 'contagens_estoque';
 const LOGS_COLLECTION = 'historico_acoes';
+const DAILY_DIFFS_COLLECTION = 'diferencas_diarias_salvas';
 
 export interface ActionLog {
   id?: string;
@@ -47,6 +51,25 @@ let saveDebounceTimer: any = null;
 let lastKnownTotalChunks = 1;
 let lastSavedEcHash = '';
 let currentBackoffMs = 0;
+
+/**
+ * Gera um hash determinístico baseado no conteúdo completo do Estoque Central (02.05.02),
+ * evitando colisões quando o número de linhas e o tamanho em caracteres coincidem.
+ */
+export function computeEcContentHash(ec: { h?: any[]; r?: any[][] } | undefined | null): string {
+  if (!ec || !Array.isArray(ec.r)) return '';
+  const str = JSON.stringify(ec);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= (ch + (i & 0xff));
+    h2 = Math.imul(h2, 0x01000193);
+  }
+  return `${ec.r.length}_${str.length}_${(h1 >>> 0).toString(36)}_${(h2 >>> 0).toString(36)}`;
+}
 
 interface QueuedSaveRequest {
   data: RawData;
@@ -148,9 +171,14 @@ async function executeSaveWithBackoff(
         men: data.men,
         recontagens: data.recontagens,
         desativados: data.desativados,
+        diferencaConfirmadaCodes: data.diferencaConfirmadaCodes || [],
         dashboardSnapshots: data.dashboardSnapshots,
         ec0304: data.ec0304,
+        ecSyncHash: data.ecSyncHash || '',
+        priceOverrides: data.priceOverrides || {},
         gradeEc: data.gradeEc,
+        frozen020502: data.frozen020502 || {},
+        frozen020502At: data.frozen020502At || '',
         contagem021101: data.contagem021101,
         contagensEstoque: data.contagensEstoque || [],
       });
@@ -202,11 +230,11 @@ async function executeSaveWithBackoff(
         version: 2,
       });
 
-      // 5. Salva o estoque central apenas quando houver alteração real nele (economiza banda)
+      // 5. Salva o estoque central apenas quando houver alteração real nele (economiza banda sem risco de colisão)
       if (data.ec) {
-        const ecStr = JSON.stringify(data.ec);
-        const ecHash = `${data.ec.r?.length || 0}_${ecStr.length}`;
+        const ecHash = computeEcContentHash(data.ec);
         if (ecHash !== lastSavedEcHash) {
+          const ecStr = JSON.stringify(data.ec);
           await setDoc(ecDocRef, {
             payload: ecStr,
             clientSessionId: CLIENT_SESSION_ID,
@@ -354,18 +382,30 @@ export async function loadStateFromFirestore(): Promise<RawData | null> {
       }
     }
 
+    lastKnownTotalChunks = totalChunks;
+    lastSavedEcHash = parsedEc ? computeEcContentHash(parsedEc) : '';
+
+    const loadedOverrides: Record<number, number> = parsedMain.priceOverrides || {};
+
     return {
       xs: parsedMain.xs || [],
-      res: parsedMain.res || [],
-      gradeRes: parsedMain.gradeRes,
+      res: applyFixedPricesToRes(parsedMain.res || [], loadedOverrides),
+      gradeRes: parsedMain.gradeRes
+        ? applyFixedPricesToRes(parsedMain.gradeRes, loadedOverrides)
+        : undefined,
       aj: parsedMain.aj || { av: [], so: [], rp: [], fm: [] },
       dia: parsedMain.dia || [],
       men: parsedMain.men || [],
       ec: parsedEc || { h: [], r: [] },
+      ecSyncHash: parsedMain.ecSyncHash || '',
+      priceOverrides: loadedOverrides,
       gradeEc: parsedMain.gradeEc,
       ec0304: parsedMain.ec0304,
+      frozen020502: parsedMain.frozen020502 || {},
+      frozen020502At: parsedMain.frozen020502At || '',
       recontagens: parsedMain.recontagens || [],
       desativados: parsedMain.desativados || [],
+      diferencaConfirmadaCodes: parsedMain.diferencaConfirmadaCodes || [],
       dashboardSnapshots: parsedMain.dashboardSnapshots || [],
       contagem021101: parsedMain.contagem021101 || { counts: [] },
       contagensEstoque: parsedContagens,
@@ -537,7 +577,114 @@ export async function loadDevolucaoReminderDate(): Promise<string | null> {
       return snap.data().devolucaoReminderDate;
     }
   } catch (e) {
-    console.warn('[Firestore] Erro ao carregar lembrete do Firebase:', e);
+    console.warn('[Firestore] Erro ao carregar lembrete no Firebase:', e);
   }
   return null;
+}
+
+/**
+ * Salva a diferença conciliada de UM DIA ESPECÍFICO em sua própria aba/documento isolado no Firebase:
+ * coleção `diferencas_diarias_salvas`, documento ID = `YYYY-MM-DD` (ex: `2026-11-16`).
+ * Nunca mescla dados de outros dias.
+ */
+export async function saveDailyDiffToFirestore(record: SavedDailyDiffRecord): Promise<boolean> {
+  try {
+    const docRef = doc(db, DAILY_DIFFS_COLLECTION, record.dateKey);
+    await setDoc(docRef, {
+      ...record,
+      clientSessionId: CLIENT_SESSION_ID,
+      updatedAt: serverTimestamp(),
+      updatedAtStr: new Date().toISOString(),
+    });
+    await logActionToFirestore(
+      `Salvou Diferença Isolada (${record.dateBR})`,
+      `Aba Firebase: ${DAILY_DIFFS_COLLECTION}/${record.dateKey} | Origem: ${record.sourceAction} | Faltas: R$ ${Math.round(record.summary.totalFaltas)} | Sobras: R$ ${Math.round(record.summary.totalSobras)} | Saldo: R$ ${Math.round(record.summary.saldoFinal)}`
+    );
+    return true;
+  } catch (e) {
+    console.warn(`[Firestore] Erro ao salvar diferença do dia ${record.dateKey}:`, e);
+    return false;
+  }
+}
+
+/**
+ * Carrega todas as diferenças salvas por data (cada documento = 1 dia isolado `YYYY-MM-DD`)
+ */
+export async function loadAllDailyDiffsFromFirestore(): Promise<Record<string, SavedDailyDiffRecord>> {
+  try {
+    const snap = await getDocs(collection(db, DAILY_DIFFS_COLLECTION));
+    const result: Record<string, SavedDailyDiffRecord> = {};
+    snap.forEach((docSnap) => {
+      const data = docSnap.data() as SavedDailyDiffRecord;
+      if (data && data.dateKey && Array.isArray(data.items)) {
+        result[data.dateKey] = {
+          dateKey: data.dateKey,
+          dateBR: data.dateBR,
+          day: data.day,
+          month: data.month,
+          year: data.year,
+          savedAt: data.savedAt,
+          sourceAction: data.sourceAction,
+          summary: data.summary,
+          items: data.items,
+        };
+      }
+    });
+    return result;
+  } catch (e) {
+    console.warn('[Firestore] Erro ao carregar diferenças diárias salvas:', e);
+    return {};
+  }
+}
+
+/**
+ * Exclui apenas a aba/documento de uma data específica no Firebase (`YYYY-MM-DD`)
+ */
+export async function deleteDailyDiffFromFirestore(dateKey: string): Promise<boolean> {
+  try {
+    await deleteDoc(doc(db, DAILY_DIFFS_COLLECTION, dateKey));
+    return true;
+  } catch (e) {
+    console.warn(`[Firestore] Erro ao excluir diferença do dia ${dateKey}:`, e);
+    return false;
+  }
+}
+
+/**
+ * Escuta em tempo real as abas diárias isoladas (`diferencas_diarias_salvas`)
+ */
+export function subscribeToDailyDiffs(
+  onUpdate: (records: Record<string, SavedDailyDiffRecord>) => void
+): () => void {
+  let isFirst = true;
+  return onSnapshot(
+    collection(db, DAILY_DIFFS_COLLECTION),
+    (snap) => {
+      if (isFirst) {
+        isFirst = false;
+        return;
+      }
+      const result: Record<string, SavedDailyDiffRecord> = {};
+      snap.forEach((docSnap) => {
+        const data = docSnap.data() as SavedDailyDiffRecord;
+        if (data && data.dateKey && Array.isArray(data.items)) {
+          result[data.dateKey] = {
+            dateKey: data.dateKey,
+            dateBR: data.dateBR,
+            day: data.day,
+            month: data.month,
+            year: data.year,
+            savedAt: data.savedAt,
+            sourceAction: data.sourceAction,
+            summary: data.summary,
+            items: data.items,
+          };
+        }
+      });
+      onUpdate(result);
+    },
+    (error) => {
+      console.error('Erro no listener realtime de diferencas_diarias_salvas:', error);
+    }
+  );
 }

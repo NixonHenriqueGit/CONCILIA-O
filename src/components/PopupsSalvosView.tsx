@@ -137,6 +137,7 @@ export const PopupsSalvosView: React.FC<PopupsSalvosViewProps> = ({
   const rowScrollRef = useRef<HTMLDivElement>(null);
   const [isExportingJpg, setIsExportingJpg] = useState(false);
   const [exportingCardId, setExportingCardId] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [layoutMode, setLayoutMode] = useState<'table' | 'linear' | 'grid' | 'fit'>('table'); // Padrão: 'table' (Por Linha e Coluna)
 
   const handlePrint = () => {
@@ -158,6 +159,7 @@ export const PopupsSalvosView: React.FC<PopupsSalvosViewProps> = ({
   const handleExportBoardJpg = async () => {
     if (!printAreaRef.current || savedPopups.length === 0) return;
     try {
+      setExportError(null);
       setIsExportingJpg(true);
       // Pequena pausa para garantir renderização estável
       await new Promise((r) => setTimeout(r, 120));
@@ -181,7 +183,7 @@ export const PopupsSalvosView: React.FC<PopupsSalvosViewProps> = ({
       link.click();
     } catch (err) {
       console.error('Erro ao gerar print em JPG:', err);
-      alert('Não foi possível gerar a imagem JPG. Tente novamente.');
+      setExportError('Não foi possível gerar a imagem JPG. Tente novamente.');
     } finally {
       setIsExportingJpg(false);
     }
@@ -433,6 +435,18 @@ export const PopupsSalvosView: React.FC<PopupsSalvosViewProps> = ({
       </div>
 
       {/* Main Grid of Saved Pop-ups (Área de Captura do Print em JPG) */}
+      {exportError && (
+        <div className="mx-5 mt-3 px-4 py-2 bg-rose-50 border border-rose-300 text-rose-800 rounded-lg text-xs font-bold flex items-center justify-between print:hidden">
+          <span>⚠️ {exportError}</span>
+          <button
+            type="button"
+            onClick={() => setExportError(null)}
+            className="text-rose-700 hover:text-rose-950 font-black px-1.5"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div ref={printAreaRef} className="w-full px-3 sm:px-5 py-4">
         {/* Cabeçalho do Relatório para o Print em JPG */}
         {filteredPopups.length > 0 && (

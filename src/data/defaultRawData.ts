@@ -58,13 +58,16 @@ import {
   canonicalOfficialAj,
   canonicalOfficialDesativados,
 } from './canonicalOfficialData';
+import { applyFixedPricesToRes } from './fixedPrices';
+
+const fixedInitialRes = applyFixedPricesToRes(canonicalOfficialRes);
 
 export const initialRawData: RawData = {
   xs,
   aj: canonicalOfficialAj,
   dia,
-  res: canonicalOfficialRes,
-  gradeRes: canonicalOfficialRes.map((r) => [...r] as typeof r),
+  res: fixedInitialRes,
+  gradeRes: fixedInitialRes.map((r) => [...r] as typeof r),
   men: seededMen,
   ec,
   gradeEc: undefined,

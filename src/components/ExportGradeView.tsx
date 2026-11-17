@@ -29,6 +29,7 @@ export interface GradeExportRow {
   code: number;
   desc: string;
   disp020502: number;
+  disp020502Congelada: number | null;
   ajusteDiferenca: number;
   ajusteAvarias: number;
   quantidadeProduto: number;
@@ -58,16 +59,16 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
   const [sortField, setSortField] = useState<'code' | 'desc' | 'quantidadeProduto'>('code');
   const [sortAsc, setSortAsc] = useState(true);
 
-  // 1. Fonte dos dados da 02.05.02 (prioriza gradeEc específica ou ec geral)
+  // 1. Fonte dos dados da 02.05.02 (vinculada prioritariamente ao Estoque Central)
   const ecSource = useMemo(() => {
-    if (data.gradeEc && Array.isArray(data.gradeEc.r) && data.gradeEc.r.length > 0) {
-      return data.gradeEc;
-    }
     if (data.ec && Array.isArray(data.ec.r) && data.ec.r.length > 0) {
       return data.ec;
     }
+    if (data.gradeEc && Array.isArray(data.gradeEc.r) && data.gradeEc.r.length > 0) {
+      return data.gradeEc;
+    }
     return null;
-  }, [data.gradeEc, data.ec]);
+  }, [data.ec, data.gradeEc]);
 
   // 2. Mapeamento da Coluna L (Disponível Fiscal) e Colunas da 02.05.02
   const ecMap = useMemo(() => {
@@ -89,7 +90,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
       h.includes('descricao') || h.includes('descr') || h === 'nome'
     );
     let dispIdx = headers.findIndex((h) =>
-      h === 'disponivel' || h === 'disponivel fiscal' || h === 'saldo grade real' || h === 'qtd estoque'
+      h === 'disponivel' || h === 'disponivel fiscal' || h === 'saldo grade real'
     );
 
     if (pIdx < 0) pIdx = 3;
@@ -180,9 +181,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
       data.dia.forEach((d) => {
         const code = d[0];
         const val = d[2] !== 0 ? d[2] : d[1];
-        if (val !== 0) {
-          map[code] = val;
-        }
+        map[code] = val;
       });
     }
 
@@ -249,9 +248,14 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
         const desc = ecItem?.desc || calc?.d || resRow?.[1] || `PRODUTO ${code}`;
         const rawDisp = ecItem ? Math.round(ecItem.disp) : Math.round(row.length > 11 ? parseColL(row[11]) : 0);
         const disp020502 = Math.max(0, rawDisp);
+        const disp020502Congelada =
+          data.frozen020502 && data.frozen020502[code] !== undefined
+            ? Math.max(0, Math.round(data.frozen020502[code]))
+            : null;
 
-        // Ajuste Diferença Diária / Congelamento / 02.05.02 (Sobra soma, Falta reduz)
+        // Ajuste Diferença Diária / Congelamento (apenas Faltas são abatidas; Sobras NUNCA entram no lançamento)
         const ajusteDiferenca = Math.round(diferencasMap[code] || 0);
+        const faltaDeduzir = ajusteDiferenca < 0 ? Math.abs(ajusteDiferenca) : 0;
 
         // Ajuste de Avarias / Quebras em caixas (reduz a quantidade que pode ir para a grade)
         const fatorCx = calc?.V || resRow?.[4] || 1;
@@ -260,11 +264,13 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
 
         // Se for permanente, fixa a quantidade permanente solicitada (ex: 20 cx)
         const perm = PERMANENT_GRADE_ITEMS[code];
-        const quantidadeProduto = perm 
-          ? perm.qty 
-          : Math.max(0, Math.round(disp020502 + ajusteDiferenca - ajusteAvarias));
+        const quantidadeProduto = perm
+          ? perm.qty
+          : disp020502 <= 0
+          ? 0
+          : Math.max(0, Math.round(disp020502 - faltaDeduzir - ajusteAvarias));
 
-        const hasDiferenca = ajusteDiferenca !== 0;
+        const hasDiferenca = faltaDeduzir > 0;
         const hasAvaria = ajusteAvarias !== 0;
         const hasBoth = hasDiferenca && hasAvaria;
         const isZero = quantidadeProduto <= 0;
@@ -273,6 +279,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
           code,
           desc,
           disp020502: perm ? perm.qty : disp020502,
+          disp020502Congelada,
           ajusteDiferenca: perm ? 0 : ajusteDiferenca,
           ajusteAvarias: perm ? 0 : ajusteAvarias,
           quantidadeProduto,
@@ -297,17 +304,24 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
         const desc = calc?.d || r[1] || `PRODUTO ${code}`;
         const fatorCx = calc?.V || r[4] || 1;
         const disp020502 = Math.max(0, Math.round(calc?.H !== undefined ? calc.H : (fatorCx > 1 ? Math.floor(r[3] / fatorCx) : r[3])));
+        const disp020502Congelada =
+          data.frozen020502 && data.frozen020502[code] !== undefined
+            ? Math.max(0, Math.round(data.frozen020502[code]))
+            : null;
 
         const ajusteDiferenca = Math.round(diferencasMap[code] || 0);
+        const faltaDeduzir = ajusteDiferenca < 0 ? Math.abs(ajusteDiferenca) : 0;
         const totalAvariasUnid = avariasMap[code] || 0;
         const ajusteAvarias = Math.round(totalAvariasUnid / (fatorCx > 0 ? fatorCx : 1));
 
         const perm = PERMANENT_GRADE_ITEMS[code];
-        const quantidadeProduto = perm 
-          ? perm.qty 
-          : Math.max(0, Math.round(disp020502 + ajusteDiferenca - ajusteAvarias));
+        const quantidadeProduto = perm
+          ? perm.qty
+          : disp020502 <= 0
+          ? 0
+          : Math.max(0, Math.round(disp020502 - faltaDeduzir - ajusteAvarias));
 
-        const hasDiferenca = ajusteDiferenca !== 0;
+        const hasDiferenca = faltaDeduzir > 0;
         const hasAvaria = ajusteAvarias !== 0;
         const hasBoth = hasDiferenca && hasAvaria;
         const isZero = quantidadeProduto <= 0;
@@ -316,6 +330,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
           code,
           desc,
           disp020502: perm ? perm.qty : disp020502,
+          disp020502Congelada,
           ajusteDiferenca: perm ? 0 : ajusteDiferenca,
           ajusteAvarias: perm ? 0 : ajusteAvarias,
           quantidadeProduto,
@@ -340,11 +355,16 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
         const calc = calculatedMap[code];
         const resRow = (data.res || []).find((r) => r[0] === code);
         const desc = calc?.d || resRow?.[1] || perm.desc;
+        const disp020502Congelada =
+          data.frozen020502 && data.frozen020502[code] !== undefined
+            ? Math.max(0, Math.round(data.frozen020502[code]))
+            : null;
 
         rows.push({
           code,
           desc,
           disp020502: perm.qty,
+          disp020502Congelada,
           ajusteDiferenca: 0,
           ajusteAvarias: 0,
           quantidadeProduto: perm.qty,
@@ -367,6 +387,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
     calculatedMap,
     data.res,
     data.desativados,
+    data.frozen020502,
     diferencasMap,
     avariasMap,
     codigoGradePadrao,
@@ -379,7 +400,10 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
     const totalCaixasGrade = validRows.reduce((acc, r) => acc + r.quantidadeProduto, 0);
     const totalDisp020502 = rawExportRows.reduce((acc, r) => acc + r.disp020502, 0);
     const difRows = rawExportRows.filter((r) => r.hasDiferenca);
-    const totalAjusteDiferenca = rawExportRows.reduce((acc, r) => acc + r.ajusteDiferenca, 0);
+    const totalAjusteDiferenca = rawExportRows.reduce(
+      (acc, r) => acc + (r.ajusteDiferenca < 0 ? r.ajusteDiferenca : 0),
+      0
+    );
     const avariaRows = rawExportRows.filter((r) => r.hasAvaria);
     const totalAjusteAvarias = rawExportRows.reduce((acc, r) => acc + r.ajusteAvarias, 0);
     const bothRows = rawExportRows.filter((r) => r.hasBoth);
@@ -541,6 +565,11 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
               <span className="text-xs px-2.5 py-0.5 rounded-full font-bold bg-purple-600 text-white">
                 Ajustes Automáticos: Congelamentos + Quebras/Avarias
               </span>
+              {data.frozen020502At && (
+                <span className="text-xs px-2.5 py-0.5 rounded-full font-bold bg-sky-600 text-white">
+                  ❄️ 02.05.02 Congelada: {data.frozen020502At}
+                </span>
+              )}
               <span className="text-xs px-2.5 py-0.5 rounded-full font-bold bg-amber-500 text-slate-950">
                 Padrão Promax: importacaoGrade.csv (;)
               </span>
@@ -944,7 +973,17 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
                   <th className="py-3 px-3 border-r border-amber-300 text-center" title="Disponível fiscal da Coluna L">
                     Disp. 02.05.02 (L)
                   </th>
-                  <th className="py-3 px-3 border-r border-amber-300 text-center" title="Ajuste de congelamento / DIF diária / 02.05.02">
+                  <th
+                    className="py-3 px-3 border-r border-amber-300 text-center bg-amber-300/60"
+                    title={
+                      data.frozen020502At
+                        ? `Disponível 02.05.02 congelado no botão CONGELAR do Dashboard em ${data.frozen020502At}`
+                        : 'Disponível 02.05.02 congelado ao clicar no botão CONGELAR no Dashboard'
+                    }
+                  >
+                    02.05.02 Congelada
+                  </th>
+                  <th className="py-3 px-3 border-r border-amber-300 text-center" title="Ajuste de congelamento / DIF diária / 02.05.02 (apenas faltas abatidas; sobras não são lançadas)">
                     Ajuste DIF Diária
                   </th>
                   <th className="py-3 px-3 border-r border-amber-300 text-center" title="Quebras e avarias abatidas">
@@ -953,7 +992,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
                   <th
                     onClick={() => toggleSort('quantidadeProduto')}
                     className="py-3 px-3 cursor-pointer hover:bg-amber-400 border-r border-amber-300 text-center font-black bg-amber-400"
-                    title="Quantidade calculada para a grade: Disp + DIF - Avarias"
+                    title="Quantidade calculada para a grade: Disp - Faltas - Avarias (sobras não entram)"
                   >
                     Quantidade Grade
                   </th>
@@ -971,7 +1010,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
               <tbody className="divide-y divide-slate-200 text-xs">
                 {sortedRows.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="py-12 text-center text-slate-400">
+                    <td colSpan={10} className="py-12 text-center text-slate-400">
                       Nenhum produto encontrado com os filtros aplicados.
                     </td>
                   </tr>
@@ -1005,17 +1044,43 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
                         {row.disp020502.toLocaleString('pt-BR')} cx
                       </td>
 
+                      {/* 02.05.02 Congelada no Dashboard */}
+                      <td className="py-2 px-3 font-mono font-semibold text-indigo-900 bg-indigo-50/30 border-r border-slate-100">
+                        {row.disp020502Congelada !== null ? (
+                          <div className="inline-flex items-center justify-center gap-1">
+                            <span>{row.disp020502Congelada.toLocaleString('pt-BR')} cx</span>
+                            {!row.isPermanente && row.disp020502 !== row.disp020502Congelada && (
+                              <span
+                                className={`text-[10px] font-bold px-1 rounded ${
+                                  row.disp020502 > row.disp020502Congelada
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-rose-100 text-rose-800'
+                                }`}
+                                title={`Variação vs 02.05.02 congelada: ${row.disp020502 - row.disp020502Congelada > 0 ? '+' : ''}${row.disp020502 - row.disp020502Congelada} cx`}
+                              >
+                                {row.disp020502 - row.disp020502Congelada > 0 ? '+' : ''}
+                                {row.disp020502 - row.disp020502Congelada}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-slate-400" title="Clique em CONGELAR no Dashboard para congelar a 02.05.02">
+                            —
+                          </span>
+                        )}
+                      </td>
+
                       {/* Ajuste Diferença */}
                       <td className="py-2 px-3 font-mono font-bold border-r border-slate-100">
                         {row.ajusteDiferenca === 0 ? (
                           <span className="text-slate-400">0</span>
                         ) : row.ajusteDiferenca > 0 ? (
-                          <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-mono">
-                            +{row.ajusteDiferenca} cx (Sobra)
+                          <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 font-mono">
+                            +{row.ajusteDiferenca} cx (Sobra - não lançada)
                           </span>
                         ) : (
                           <span className="text-red-700 bg-red-50 px-2 py-0.5 rounded border border-red-200 font-mono">
-                            {row.ajusteDiferenca} cx (Falta)
+                            {row.ajusteDiferenca} cx (Falta abatida)
                           </span>
                         )}
                       </td>
@@ -1094,7 +1159,7 @@ export const ExportGradeView: React.FC<ExportGradeViewProps> = ({
             )}
           </div>
           <div className="flex items-center gap-3 font-mono text-[11px]">
-            <span>Fórmula: <strong className="text-slate-800">QtdGrade = Máx(0, Disp020502 + DIF - Quebras)</strong></span>
+            <span>Fórmula: <strong className="text-slate-800">QtdGrade = Máx(0, Disp020502 - Faltas - Quebras)</strong> (Sobras não entram no lançamento)</span>
           </div>
         </div>
       </div>

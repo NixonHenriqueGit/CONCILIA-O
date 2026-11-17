@@ -66,12 +66,12 @@ export function calculateExpectedGrade(
   const seenCodes = new Set<number>();
   const desativadosSet = new Set(data.desativados || []);
 
-  // 1. Fonte da 02.05.02
+  // 1. Fonte da 02.05.02 (vinculada ao Estoque Central)
   const ecSource =
-    data.gradeEc && Array.isArray(data.gradeEc.r) && data.gradeEc.r.length > 0
-      ? data.gradeEc
-      : data.ec && Array.isArray(data.ec.r) && data.ec.r.length > 0
+    data.ec && Array.isArray(data.ec.r) && data.ec.r.length > 0
       ? data.ec
+      : data.gradeEc && Array.isArray(data.gradeEc.r) && data.gradeEc.r.length > 0
+      ? data.gradeEc
       : null;
 
   // 2. Mapeamento da Coluna L
@@ -92,7 +92,7 @@ export function calculateExpectedGrade(
       h.includes('descricao') || h.includes('descr') || h === 'nome'
     );
     let dispIdx = headers.findIndex((h) =>
-      h === 'disponivel' || h === 'disponivel fiscal' || h === 'saldo grade real' || h === 'qtd estoque'
+      h === 'disponivel' || h === 'disponivel fiscal' || h === 'saldo grade real'
     );
 
     if (pIdx < 0) pIdx = 3;
@@ -160,7 +160,7 @@ export function calculateExpectedGrade(
     data.dia.forEach((d) => {
       const code = d[0];
       const val = d[2] !== 0 ? d[2] : d[1];
-      if (val !== 0) diferencasMap.set(code, val);
+      diferencasMap.set(code, val);
     });
   }
   if (Array.isArray(data.men)) {
@@ -216,11 +216,16 @@ export function calculateExpectedGrade(
       const disp020502 = Math.max(0, rawDisp);
 
       const ajusteDiferenca = Math.round(diferencasMap.get(code) || 0);
+      const faltaDeduzir = ajusteDiferenca < 0 ? Math.abs(ajusteDiferenca) : 0;
       const fatorCx = calc?.V || resRow?.[4] || 1;
       const totalAvariasUnid = avariasMap.get(code) || 0;
       const ajusteAvarias = Math.round(totalAvariasUnid / (fatorCx > 0 ? fatorCx : 1));
 
-      const quantidadeEsperada = Math.max(0, Math.round(disp020502 + ajusteDiferenca - ajusteAvarias));
+      // Sobras nunca são lançadas; se o disponível na 02.05.02 estiver zerado, mantém 0
+      const quantidadeEsperada =
+        disp020502 <= 0
+          ? 0
+          : Math.max(0, Math.round(disp020502 - faltaDeduzir - ajusteAvarias));
 
       // Regra Promax: produtos zerados não são lançados
       if (quantidadeEsperada <= 0) return;
@@ -249,10 +254,14 @@ export function calculateExpectedGrade(
       const disp020502 = Math.round(calc?.H !== undefined ? calc.H : (fatorCx > 1 ? Math.floor(r[3] / fatorCx) : r[3]));
 
       const ajusteDiferenca = Math.round(diferencasMap.get(code) || 0);
+      const faltaDeduzir = ajusteDiferenca < 0 ? Math.abs(ajusteDiferenca) : 0;
       const totalAvariasUnid = avariasMap.get(code) || 0;
       const ajusteAvarias = Math.round(totalAvariasUnid / (fatorCx > 0 ? fatorCx : 1));
 
-      const quantidadeEsperada = Math.max(0, Math.round(disp020502 + ajusteDiferenca - ajusteAvarias));
+      const quantidadeEsperada =
+        disp020502 <= 0
+          ? 0
+          : Math.max(0, Math.round(disp020502 - faltaDeduzir - ajusteAvarias));
       if (quantidadeEsperada <= 0) return;
 
       result.set(code, {

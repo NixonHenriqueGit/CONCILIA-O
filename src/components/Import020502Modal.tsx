@@ -391,7 +391,8 @@ export const Import020502Modal: React.FC<Import020502ModalProps> = ({
                   <>
                     • A <b>Coluna L (Disponível Fiscal)</b> atualizará diretamente a <b>GRADE</b> para todos os <b>{parsePreview.bodyRows?.length || 0} produtos</b>.<br />
                     • <b>{parsePreview.matchedCount}</b> produtos serão sincronizados na base e no <b>RESUMO</b>.<br />
-                    • A conciliação e os rankings do <b>DASHBOARD</b> serão recalculados imediatamente.
+                    • A conciliação e os rankings do <b>DASHBOARD</b> serão recalculados imediatamente.<br />
+                    • 🛡️ <b>DIF Diária e DIF Mensal protegidas:</b> Só serão atualizadas quando você finalizar a conciliação clicando em <b>CONGELAR</b>.
                   </>
                 )}
               </div>

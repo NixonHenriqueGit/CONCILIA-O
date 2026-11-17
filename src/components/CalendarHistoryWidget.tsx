@@ -39,6 +39,7 @@ export const CalendarHistoryWidget: React.FC<CalendarHistoryWidgetProps> = ({
   }, [today]);
 
   const [selectedDateStr, setSelectedDateStr] = useState<string>(todayStr);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Mapa de snapshots por data "YYYY-MM-DD"
   const snapshotDateMap = useMemo(() => {
@@ -384,22 +385,33 @@ export const CalendarHistoryWidget: React.FC<CalendarHistoryWidgetProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        if (window.confirm(`Deseja excluir o snapshot de ${snap.date}?`)) {
+                        if (confirmDeleteId === snap.id) {
+                          setConfirmDeleteId(null);
                           onDeleteSnapshot(snap.id);
+                        } else {
+                          setConfirmDeleteId(snap.id);
                         }
                       }}
+                      onMouseLeave={() => {
+                        if (confirmDeleteId === snap.id) setConfirmDeleteId(null);
+                      }}
                       style={{
-                        background: '#fff',
+                        background: confirmDeleteId === snap.id ? '#DC2626' : '#fff',
                         border: '1px solid #FECDD3',
                         borderRadius: '3px',
                         padding: '3px 5px',
                         fontSize: '9px',
-                        color: '#DC2626',
+                        fontWeight: 'bold',
+                        color: confirmDeleteId === snap.id ? '#fff' : '#DC2626',
                         cursor: 'pointer',
                       }}
-                      title="Excluir este snapshot"
+                      title={
+                        confirmDeleteId === snap.id
+                          ? 'Clique novamente para confirmar exclusão'
+                          : 'Excluir este snapshot'
+                      }
                     >
-                      <Trash2 size={10} />
+                      {confirmDeleteId === snap.id ? 'Confirma?' : <Trash2 size={10} />}
                     </button>
                   </div>
                 </div>

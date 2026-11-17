@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { RawData, CalculatedProduct, ResRow } from '../data/types';
+import { RawData, CalculatedProduct, ResRow, SavedDailyDiffRecord } from '../data/types';
 import { N, Rt, RenderMoney, formatBRL } from '../utils/formatters';
 import { 
   X, 
@@ -67,6 +67,7 @@ interface AnaliseDivergenciasModalProps {
   onClose: () => void;
   data: RawData;
   calculated: CalculatedProduct[];
+  savedDailyDiffs?: Record<string, SavedDailyDiffRecord>;
   initialFilter?: 'all' | 'vermelho' | 'laranja';
   initialCode?: number | null;
 }
@@ -76,6 +77,7 @@ export const AnaliseDivergenciasModal: React.FC<AnaliseDivergenciasModalProps> =
   onClose,
   data,
   calculated,
+  savedDailyDiffs = {},
   initialFilter = 'all',
   initialCode = null,
 }) => {
@@ -108,6 +110,53 @@ export const AnaliseDivergenciasModal: React.FC<AnaliseDivergenciasModalProps> =
     return map;
   }, [data.dia]);
 
+  const latestPriorItemsMap = useMemo(() => {
+    const map = new Map<number, number>();
+    const now = new Date();
+    const todayDateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const priorRecords = (Object.values(savedDailyDiffs) as SavedDailyDiffRecord[])
+      .filter(
+        (r) =>
+          r.dateKey &&
+          (r.dateKey < todayDateKey ||
+            (r.dateKey === todayDateKey && r.sourceAction === 'CONGELAR'))
+      )
+      .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+    const latestPrior = priorRecords.length > 0 ? priorRecords[priorRecords.length - 1] : null;
+    if (latestPrior) {
+      latestPrior.items.forEach((it) => map.set(it.cod, it.difCx));
+    }
+    return map.size > 0 ? map : null;
+  }, [savedDailyDiffs]);
+
+  const lastMenDiffMap = useMemo(() => {
+    const map = new Map<number, number>();
+    const todayDay = new Date().getDate();
+    (data.men || []).forEach((r) => {
+      const days = r[4] || [];
+      let found: number | null = null;
+      for (let idx = Math.min(todayDay - 2, days.length - 1); idx >= 0; idx--) {
+        if (days[idx] !== null && days[idx] !== undefined) {
+          found = days[idx];
+          break;
+        }
+      }
+      if (found === null) {
+        for (let idx = days.length - 1; idx >= 0; idx--) {
+          if (days[idx] !== null && days[idx] !== undefined) {
+            found = days[idx];
+            break;
+          }
+        }
+      }
+      if (found === null && r[3] !== null && r[3] !== undefined && r[3] !== 0) {
+        found = r[3];
+      }
+      if (found !== null) map.set(r[0], found);
+    });
+    return map;
+  }, [data.men]);
+
   const resMap = useMemo(() => {
     const map: Record<number, ResRow> = {};
     data.res.forEach((r) => {
@@ -116,14 +165,6 @@ export const AnaliseDivergenciasModal: React.FC<AnaliseDivergenciasModalProps> =
     return map;
   }, [data.res]);
 
-  const calculatedMap = useMemo(() => {
-    const map: Record<number, CalculatedProduct> = {};
-    calculated.forEach((r) => {
-      map[r.c] = r;
-    });
-    return map;
-  }, [calculated]);
-
   // Construção de todos os itens com auditoria minuciosa
   const auditItems = useMemo<AuditItem[]>(() => {
     const list: AuditItem[] = [];
@@ -131,7 +172,11 @@ export const AnaliseDivergenciasModal: React.FC<AnaliseDivergenciasModalProps> =
     calculated.forEach((r) => {
       const code = r.c;
       const prevEntry = diaMap[code];
-      const prevDiff = prevEntry ? prevEntry.eq : 0;
+      const prevDiff = latestPriorItemsMap
+        ? (latestPriorItemsMap.get(code) ?? 0)
+        : lastMenDiffMap.has(code)
+        ? (lastMenDiffMap.get(code) ?? 0)
+        : (prevEntry ? prevEntry.eq : 0);
       const res = resMap[code];
 
       // r.R é a diferença atual em caixas (K - H)
@@ -269,7 +314,7 @@ export const AnaliseDivergenciasModal: React.FC<AnaliseDivergenciasModalProps> =
 
     // Ordena pelos de maior divergência em valor financeiro absoluto
     return list.sort((a, b) => Math.abs(b.deltaValor) - Math.abs(a.deltaValor));
-  }, [calculated, diaMap, resMap]);
+  }, [calculated, diaMap, latestPriorItemsMap, lastMenDiffMap, resMap]);
 
   // Estatísticas de auditoria
   const stats = useMemo(() => {
