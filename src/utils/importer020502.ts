@@ -457,14 +457,13 @@ export function process020502Rows(
     };
   }
 
-  // Totais antes da importação
+  // Totais antes da importação (mesma regra do Dashboard e Resumo: R < 0 e R > 0 com exceções xs)
   const getTotals = (calcList: ReturnType<typeof calculateProducts>['C']) => {
     const desativadosSet = new Set(currentData.desativados || []);
     const active = calcList.filter((p) => !desativadosSet.has(p.c) && !p.desativado);
-    const tf = sum(active.filter((r) => r.S < 0), (r) => -r.S);
-    const ts = sum(active.filter((r) => r.S > 0), (r) =>
-      currentData.xs.includes(r.c) ? 0 : r.S
-    );
+    const sv0 = (r: typeof active[number]) => (currentData.xs.includes(r.c) ? 0 : r.S);
+    const tf = sum(active.filter((r) => r.R < 0), (r) => -r.S);
+    const ts = sum(active.filter((r) => r.R > 0 && sv0(r) >= 0), sv0);
     return { tf, ts, sd: ts - tf };
   };
 

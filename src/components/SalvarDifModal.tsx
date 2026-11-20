@@ -57,10 +57,10 @@ export const SalvarDifModal: React.FC<SalvarDifModalProps> = ({
 
   const sv0 = (r: CalculatedProduct) => (xs.includes(r.c) ? 0 : r.S);
 
-  const faltas = activeProducts.filter((r) => r.S < 0 || r.R < 0);
+  const faltas = activeProducts.filter((r) => r.R < 0);
   faltas.sort((a, b) => a.S - b.S);
-  const sobras = activeProducts.filter((r) => sv0(r) > 0 || r.R > 0);
-  sobras.sort((a, b) => b.S - a.S);
+  const sobras = activeProducts.filter((r) => r.R > 0 && sv0(r) >= 0);
+  sobras.sort((a, b) => sv0(b) - sv0(a));
 
   const totalF = sum(faltas, (r) => -r.S);
   const totalS = sum(sobras, sv0);

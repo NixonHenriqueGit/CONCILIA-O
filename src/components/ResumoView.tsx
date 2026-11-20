@@ -6,7 +6,8 @@ import { readFileToText } from '../utils/importer020502';
 
 interface ResumoViewProps {
   calculated: CalculatedProduct[];
-  onUpdateRes: (index: number, key: 'G' | 'J', value: number) => void;
+  xs?: number[];
+  onUpdateRes: (code: number, key: 'G' | 'J', value: number) => void;
   onImportT7: (content: string, fileName: string) => void;
   t7BannerHtml: string | null;
   ecBannerHtml?: string | null;
@@ -23,6 +24,7 @@ const format2Dec = (val: number): string => {
 
 export const ResumoView: React.FC<ResumoViewProps> = ({
   calculated,
+  xs = [],
   onUpdateRes,
   onImportT7,
   t7BannerHtml,
@@ -62,12 +64,19 @@ export const ResumoView: React.FC<ResumoViewProps> = ({
 
   const kpis = useMemo(() => {
     const active = calculated.filter((r) => !r.desativado);
+    const xsSet = new Set(xs);
+    const sv0 = (r: CalculatedProduct) => (xsSet.has(r.c) ? 0 : r.S);
 
-    const dif = sum(active, (r) => r.S);
+    const faltasList = active.filter((r) => r.R < 0);
+    const sobrasList = active.filter((r) => r.R > 0 && sv0(r) >= 0);
+    const totalFaltas = sum(faltasList, (r) => -r.S);
+    const totalSobras = sum(sobrasList, sv0);
+    const dif = totalSobras - totalFaltas;
+
     const hf = sum(active, (r) => r.Y);
     const hp = sum(active, (r) => r.Z);
-    const so = active.filter((r) => r.R > 0).length;
-    const fa = active.filter((r) => r.R < 0).length;
+    const so = sobrasList.length;
+    const fa = faltasList.length;
     const ok = active.filter((r) => r.R === 0).length;
     const totalCount = so + fa + ok || 1;
     const toolkit = ((ok / totalCount) * 100).toLocaleString('pt-BR', {
@@ -78,6 +87,8 @@ export const ResumoView: React.FC<ResumoViewProps> = ({
     return {
       date: new Date().toLocaleDateString('pt-BR'),
       dif,
+      totalFaltas,
+      totalSobras,
       hf,
       hp,
       difHecto: hf - hp,
@@ -88,7 +99,7 @@ export const ResumoView: React.FC<ResumoViewProps> = ({
       ok,
       toolkit,
     };
-  }, [calculated]);
+  }, [calculated, xs]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -254,7 +265,7 @@ export const ResumoView: React.FC<ResumoViewProps> = ({
               borderBottom: '1px solid #1E293B',
             }}
           >
-            2
+            ESTOQUE FISCAL
           </div>
           <div
             style={{

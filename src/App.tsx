@@ -243,12 +243,19 @@ export default function App() {
     const row = [...newRes[index]] as ResRow;
     const colIndex = key === 'G' ? 3 : 7;
     const oldVal = row[colIndex];
-    if (oldVal === value) return;
 
-    row[colIndex] = value;
+    let nextRawVal = value;
+    if (key === 'J') {
+      const calc = calculatedMap[code];
+      const adjOffset = calc ? (calc.N - calc.M + calc.P + calc.O) : 0;
+      nextRawVal = value - adjOffset;
+    }
+    if (oldVal === nextRawVal) return;
+
+    row[colIndex] = nextRawVal;
     newRes[index] = row;
 
-    const desc = `Alterou ${key === 'G' ? 'Disponível Promax' : 'Inventário'} do item ${row[0]} (${row[1]}) de ${oldVal} para ${value}`;
+    const desc = `Alterou ${key === 'G' ? 'Disponível Promax' : 'Inventário'} do item ${row[0]} (${row[1]}) de ${oldVal} para ${nextRawVal}`;
     const nextData: RawData = {
       ...data,
       res: newRes,
@@ -1679,6 +1686,7 @@ export default function App() {
         {activeTab === 'resumo' && (
           <ResumoView
             calculated={calculatedProducts}
+            xs={data.xs}
             onUpdateRes={handleUpdateRes}
             onImportT7={handleImportT7}
             t7BannerHtml={t7BannerHtml}

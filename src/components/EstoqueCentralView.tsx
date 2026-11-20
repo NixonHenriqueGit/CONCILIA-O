@@ -257,8 +257,12 @@ export const EstoqueCentralView: React.FC<EstoqueCentralViewProps> = ({
             });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
+            const now = new Date();
+            const dd = String(now.getDate()).padStart(2, '0');
+            const mm = String(now.getMonth() + 1).padStart(2, '0');
+            const yyyy = now.getFullYear();
             a.href = url;
-            a.download = `estoque_central_${new Date().toISOString().slice(0, 10)}.csv`;
+            a.download = `CONCILIAÇÃO ${dd}-${mm}-${yyyy}.csv`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);

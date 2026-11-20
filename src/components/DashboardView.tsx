@@ -1024,11 +1024,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </td>
                   <td 
                     className="c font-mono"
-                    title={
-                      isBlue
-                        ? "🔵 DIFERENÇA PERMANECEU — NÃO PRECISA CONTAR NOVAMENTE\n• Clique 3x na quantidade para remover a marcação azul\n• Clique 2x para salvar o pop-up em POP-UPS SALVOS"
-                        : "Dê DUPLO CLIQUE para salvar este pop-up em POP-UPS SALVOS\nDê TRIPLO CLIQUE (3x) para marcar em AZUL (diferença permaneceu / não precisa contar novamente)"
-                    }
                     style={{
                       userSelect: 'none',
                       ...(isBlue
@@ -1795,11 +1790,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             </td>
                             <td 
                               className="c font-mono"
-                              title={
-                                isBlueF
-                                  ? "🔵 DIFERENÇA PERMANECEU — NÃO PRECISA CONTAR NOVAMENTE\n• Clique 3x na quantidade para remover a marcação azul\n• Clique 2x para salvar este pop-up em POP-UPS SALVOS"
-                                  : "Dê DUPLO CLIQUE para salvar este pop-up na aba POP-UPS SALVOS\nDê TRIPLO CLIQUE (3x) para marcar em AZUL (diferença permaneceu / não precisa contar novamente)"
-                              }
                               style={{
                                 userSelect: 'none',
                                 ...(isBlueF
@@ -1970,11 +1960,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             </td>
                             <td 
                               className="c font-mono"
-                              title={
-                                isBlueS
-                                  ? "🔵 DIFERENÇA PERMANECEU — NÃO PRECISA CONTAR NOVAMENTE\n• Clique 3x na quantidade para remover a marcação azul\n• Clique 2x para salvar este pop-up em POP-UPS SALVOS"
-                                  : "Dê DUPLO CLIQUE para salvar este pop-up na aba POP-UPS SALVOS\nDê TRIPLO CLIQUE (3x) para marcar em AZUL (diferença permaneceu / não precisa contar novamente)"
-                              }
                               style={{
                                 userSelect: 'none',
                                 ...(isBlueS
